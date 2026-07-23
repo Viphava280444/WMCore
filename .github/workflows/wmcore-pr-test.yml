@@ -65,12 +65,13 @@ jobs:
     env:
       SLICE: ${{ matrix.slice }}
     steps:
+      # plain anonymous clone: the workflow GITHUB_TOKEN is scoped to this repo
+      # only, so checkout@v4 gets "repository not found" for other repos
       - name: Checkout WMCore-Jenkins (pinned, scripts reused unchanged)
-        uses: actions/checkout@v4
-        with:
-          repository: dmwm/WMCore-Jenkins
-          ref: b203d87308ef65c54945e1a6bed3940445a696c3
-          path: wmcore-jenkins
+        run: |
+          rm -rf wmcore-jenkins
+          git clone --no-tags https://github.com/dmwm/WMCore-Jenkins.git wmcore-jenkins
+          git -C wmcore-jenkins checkout --detach b203d87308ef65c54945e1a6bed3940445a696c3
 
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
@@ -91,7 +92,8 @@ jobs:
         run: bash wmcore-src/.github/ci/setup-env-gha.sh
 
       - name: Stop leftover containers
-        run: docker compose -f "$COMPOSE_FILE_PATH" down --remove-orphans || true
+        run: |
+          [ -n "$COMPOSE_FILE_PATH" ] && docker compose -f "$COMPOSE_FILE_PATH" down --remove-orphans || true
 
       # same startup sequence as the Jenkinsfile
       - name: Start containers
@@ -148,18 +150,20 @@ jobs:
 
       - name: Stop containers
         if: always()
-        run: docker compose -f "$COMPOSE_FILE_PATH" down || true
+        run: |
+          [ -n "$COMPOSE_FILE_PATH" ] && docker compose -f "$COMPOSE_FILE_PATH" down || true
 
   pylint:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     steps:
+      # plain anonymous clone: the workflow GITHUB_TOKEN is scoped to this repo
+      # only, so checkout@v4 gets "repository not found" for other repos
       - name: Checkout WMCore-Jenkins (pinned, scripts reused unchanged)
-        uses: actions/checkout@v4
-        with:
-          repository: dmwm/WMCore-Jenkins
-          ref: b203d87308ef65c54945e1a6bed3940445a696c3
-          path: wmcore-jenkins
+        run: |
+          rm -rf wmcore-jenkins
+          git clone --no-tags https://github.com/dmwm/WMCore-Jenkins.git wmcore-jenkins
+          git -C wmcore-jenkins checkout --detach b203d87308ef65c54945e1a6bed3940445a696c3
 
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
@@ -210,7 +214,8 @@ jobs:
 
       - name: Stop containers
         if: always()
-        run: docker compose -f "$COMPOSE_FILE_PATH" down || true
+        run: |
+          [ -n "$COMPOSE_FILE_PATH" ] && docker compose -f "$COMPOSE_FILE_PATH" down || true
 
   summary:
     needs: [unit-tests, pylint]
