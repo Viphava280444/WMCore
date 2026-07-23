@@ -1,0 +1,253 @@
+# WMCore PR tests, migrated from Jenkins.
+#
+# This mirrors dmwm/WMCore-Jenkins (WMCore-PR-test/Jenkinsfile and
+# WMCore-PR-pylint) as closely as possible:
+#   - same images and tags (wmcore-dev, MariaDB, CouchDB)
+#   - the compose file and every test/lint script run UNCHANGED from a
+#     checkout of dmwm/WMCore-Jenkins pinned at commit b203d873
+#   - same test command, same 12 slices, same 5 retries per slice
+#
+# Differences, on purpose (fork testing phase):
+#   - runs on the fork's self-hosted runner; slices run one after another
+#   - dummy secrets and a self-signed cert (.github/ci/setup-env-gha.sh);
+#     the fork stores no secrets at all
+#   - one step redirects git URLs from dmwm/WMCore to this fork, because the
+#     unchanged scripts hardcode dmwm/WMCore for fetching PR refs.
+#     Delete that step when this workflow moves upstream.
+#   - images are kept in the local docker cache between runs (Jenkins wiped
+#     them with --rmi all on every cell)
+
+name: WMCore PR tests
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to test'
+        required: true
+      slices:
+        description: 'JSON list of slices to run'
+        required: false
+        default: '[0,1,2,3,4,5,6,7,8,9,10,11]'
+
+concurrency:
+  group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+env:
+  # same values as WMCore-PR-test/Jenkinsfile
+  WMA_TAG: '2.3.3'
+  COUCH_TAG: '3.2.2'
+  MDB_TAG: '10.6.19'
+  TEST_SERVICE: 'wmcore-pr-test'
+  SLICES: '12'
+  # Jenkins job parameter; current -stable tag on registry.cern.ch/cmsweb/wmcore-dev
+  WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
+  # Jenkins ghprb plugin equivalents
+  ghprbPullId: ${{ github.event.pull_request.number || inputs.pr_number }}
+  ghprbTargetBranch: ${{ github.base_ref || 'master' }}
+  BUILD_ID: ${{ github.run_id }}
+  DMWMBOT_TOKEN: ''
+  WMCORE_JENKINS_ORG: ${{ github.repository_owner }}
+  WMCORE_JENKINS_REF: master
+
+jobs:
+  unit-tests:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        slice: ${{ fromJSON(inputs.slices || '[0,1,2,3,4,5,6,7,8,9,10,11]') }}
+    env:
+      SLICE: ${{ matrix.slice }}
+    steps:
+      - name: Checkout WMCore-Jenkins (pinned, scripts reused unchanged)
+        uses: actions/checkout@v4
+        with:
+          repository: dmwm/WMCore-Jenkins
+          ref: b203d87308ef65c54945e1a6bed3940445a696c3
+          path: wmcore-jenkins
+
+      - name: Checkout this repo (CI glue)
+        uses: actions/checkout@v4
+        with:
+          path: wmcore-src
+
+      - name: Runtime environment
+        run: |
+          echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
+          echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
+          echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
+          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-jenkins/WMCore-Test-Base/docker-compose.yml" >> "$GITHUB_ENV"
+          docker version
+          docker compose version
+
+      - name: Prepare workspace (fork twin of setup-env.sh)
+        run: bash wmcore-src/.github/ci/setup-env-gha.sh
+
+      - name: Stop leftover containers
+        run: docker compose -f "$COMPOSE_FILE_PATH" down --remove-orphans || true
+
+      # same startup sequence as the Jenkinsfile
+      - name: Start containers
+        run: |
+          docker compose -f "$COMPOSE_FILE_PATH" up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
+          sleep 20
+          docker ps
+          echo "--Check MariaDB docker logs"
+          docker compose -f "$COMPOSE_FILE_PATH" logs mariadb
+          echo "--Check CouchDB docker logs"
+          docker compose -f "$COMPOSE_FILE_PATH" logs couchdb
+          echo "--Check CouchDB certificates"
+          docker compose -f "$COMPOSE_FILE_PATH" exec -T couchdb ls -l /data/certs
+          docker compose -f "$COMPOSE_FILE_PATH" exec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
+          echo "--Check wmcore-unittest logs"
+          docker compose -f "$COMPOSE_FILE_PATH" logs "$TEST_SERVICE"
+
+      # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
+      # git resolve that URL to this fork (PR refs live here). Also give git an
+      # identity and safe.directory for the uid-mapped exec user.
+      # DELETE this step when the workflow moves upstream.
+      - name: Point dmwm/WMCore at this fork
+        run: |
+          docker compose -f "$COMPOSE_FILE_PATH" exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
+            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
+            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"
+            cat "$GIT_CONFIG_GLOBAL"'
+
+      # same as the Jenkinsfile: retry(5) around the unchanged test script
+      - name: Run test slice
+        run: |
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            echo "Attempt $attempt: testing slice $SLICE of $SLICES for build $BUILD_ID"
+            if docker compose -f "$COMPOSE_FILE_PATH" exec -T -u "$MY_ID" \
+                 -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
+                 -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+                 "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
+              ok=1; break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nosetests-slice-${{ matrix.slice }}
+          path: ci-workspace/artifacts/nosetests*.xml
+          if-no-files-found: warn
+
+      - name: Stop containers
+        if: always()
+        run: docker compose -f "$COMPOSE_FILE_PATH" down || true
+
+  pylint:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout WMCore-Jenkins (pinned, scripts reused unchanged)
+        uses: actions/checkout@v4
+        with:
+          repository: dmwm/WMCore-Jenkins
+          ref: b203d87308ef65c54945e1a6bed3940445a696c3
+          path: wmcore-jenkins
+
+      - name: Checkout this repo (CI glue)
+        uses: actions/checkout@v4
+        with:
+          path: wmcore-src
+
+      - name: Runtime environment
+        run: |
+          echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
+          echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
+          echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
+          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-jenkins/WMCore-Test-Base/docker-compose.yml" >> "$GITHUB_ENV"
+
+      - name: Prepare workspace (fork twin of setup-env.sh)
+        run: bash wmcore-src/.github/ci/setup-env-gha.sh
+
+      - name: Start pylint container
+        run: |
+          docker compose -f "$COMPOSE_FILE_PATH" up --quiet-pull -d wmcore-pr-pylint
+          docker ps
+
+      # same fork redirect as in unit-tests; delete when moving upstream
+      - name: Point dmwm/WMCore at this fork
+        run: |
+          docker compose -f "$COMPOSE_FILE_PATH" exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
+            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
+            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
+
+      - name: Run pylint and pycodestyle (unchanged script)
+        run: |
+          docker compose -f "$COMPOSE_FILE_PATH" exec -T \
+            -e ghprbPullId="$ghprbPullId" -e ghprbTargetBranch="$ghprbTargetBranch" \
+            -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
+
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            ci-workspace/artifacts/pylintpy3Report.json
+            ci-workspace/artifacts/pep8py3.txt
+          if-no-files-found: warn
+
+      - name: Stop containers
+        if: always()
+        run: docker compose -f "$COMPOSE_FILE_PATH" down || true
+
+  summary:
+    needs: [unit-tests, pylint]
+    if: always()
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+
+      - name: Write run summary
+        run: |
+          python3 - <<'EOF'
+          import glob, os
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+          tests = failures = errors = skipped = 0
+          for f in glob.glob('results/**/nosetests*.xml', recursive=True):
+              try:
+                  suite = ET.parse(f).getroot()
+              except ET.ParseError:
+                  continue
+              suites = [suite] if suite.tag == 'testsuite' else suite.findall('testsuite')
+              for s in suites:
+                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
+                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
+          lines = ['## WMCore PR test results', '',
+                   f'| Tests | Failures | Errors | Skipped |',
+                   f'|---|---|---|---|',
+                   f'| {tests} | {failures} | {errors} | {skipped} |', '']
+          if os.path.exists('results/lint-reports/pep8py3.txt'):
+              n = sum(1 for _ in open('results/lint-reports/pep8py3.txt'))
+              lines.append(f'pycodestyle: {n} comments to review (informational, like Jenkins)')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(lines) + '\n')
+          EOF
