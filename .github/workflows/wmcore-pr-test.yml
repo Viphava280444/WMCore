@@ -107,6 +107,23 @@ jobs:
           echo "--Check wmcore-unittest logs"
           docker compose logs "$TEST_SERVICE"
 
+      # the image entrypoint clones WMCore + copies the CI scripts at container
+      # start; wait until that setup is really done (replaces guessing with a
+      # readiness check - Jenkins' sleep 20 served the same purpose)
+      - name: Wait for container CI setup
+        run: |
+          ready=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
+            sleep 5
+          done
+          if [ -z "$ready" ]; then
+            echo "Entrypoint setup did not finish in time; container logs:"
+            docker compose logs "$TEST_SERVICE"
+            exit 1
+          fi
+          docker compose logs "$TEST_SERVICE"
+
       # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
       # git resolve that URL to this fork (PR refs live here). Also give git an
       # identity and safe.directory for the uid-mapped exec user.
@@ -173,6 +190,22 @@ jobs:
         run: |
           docker compose up --quiet-pull -d wmcore-pr-pylint
           docker ps
+
+      # same readiness wait as in unit-tests: the entrypoint needs time to
+      # clone WMCore and copy the CI scripts before we can exec them
+      - name: Wait for container CI setup
+        run: |
+          ready=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T wmcore-pr-pylint test -f /home/cmsbld/TestScripts/pylintPRTest.sh; then ready=1; break; fi
+            sleep 5
+          done
+          if [ -z "$ready" ]; then
+            echo "Entrypoint setup did not finish in time; container logs:"
+            docker compose logs wmcore-pr-pylint
+            exit 1
+          fi
+          docker compose logs wmcore-pr-pylint
 
       # same fork redirect as in unit-tests; delete when moving upstream
       - name: Point dmwm/WMCore at this fork
