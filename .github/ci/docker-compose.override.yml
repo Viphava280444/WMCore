@@ -1,0 +1,22 @@
+# Fork-runner override, used together with the vendored docker-compose.yml.
+#
+# dmwm/WMCore-Jenkins is a private repository, so the image entrypoint cannot
+# clone it at container start (it does: git clone .../WMCore-Jenkins, then
+# cp -r WMCore-Jenkins/{TestScripts,ContainerScripts} into /home/cmsbld).
+# Instead, a clone kept on the runner VM is mounted read-only at the same
+# place; the entrypoint's failed clone is harmless and its cp -r then copies
+# the scripts from the mount. Private code never leaves the CERN VM.
+#
+# Not needed upstream: dmwm runners can clone the repo directly.
+
+x-wmj-mount: &wmj-mount
+  volumes:
+    - "${WMCORE_JENKINS_HOST_DIR:-/data/vkhlaisu/WMCore-Jenkins}:/home/cmsbld/WMCore-Jenkins:ro"
+
+services:
+  wmcore-pr-test:
+    <<: *wmj-mount
+  wmcore-pr-pylint:
+    <<: *wmj-mount
+  wmcore-unittests:
+    <<: *wmj-mount

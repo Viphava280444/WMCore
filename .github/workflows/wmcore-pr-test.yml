@@ -52,8 +52,10 @@ env:
   ghprbTargetBranch: ${{ github.base_ref || 'master' }}
   BUILD_ID: ${{ github.run_id }}
   DMWMBOT_TOKEN: ''
-  WMCORE_JENKINS_ORG: ${{ github.repository_owner }}
-  WMCORE_JENKINS_REF: master
+  WMCORE_JENKINS_ORG: dmwm
+  WMCORE_JENKINS_REF: main
+  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file
+  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
 
 jobs:
   unit-tests:
@@ -78,7 +80,7 @@ jobs:
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
           docker version
           docker compose version
 
@@ -87,23 +89,23 @@ jobs:
 
       - name: Stop leftover containers
         run: |
-          [ -n "$COMPOSE_FILE_PATH" ] && docker compose -f "$COMPOSE_FILE_PATH" down --remove-orphans || true
+          [ -n "$COMPOSE_FILE" ] && docker composedown --remove-orphans || true
 
       # same startup sequence as the Jenkinsfile
       - name: Start containers
         run: |
-          docker compose -f "$COMPOSE_FILE_PATH" up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
+          docker composeup --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
           sleep 20
           docker ps
           echo "--Check MariaDB docker logs"
-          docker compose -f "$COMPOSE_FILE_PATH" logs mariadb
+          docker composelogs mariadb
           echo "--Check CouchDB docker logs"
-          docker compose -f "$COMPOSE_FILE_PATH" logs couchdb
+          docker composelogs couchdb
           echo "--Check CouchDB certificates"
-          docker compose -f "$COMPOSE_FILE_PATH" exec -T couchdb ls -l /data/certs
-          docker compose -f "$COMPOSE_FILE_PATH" exec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
+          docker composeexec -T couchdb ls -l /data/certs
+          docker composeexec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
           echo "--Check wmcore-unittest logs"
-          docker compose -f "$COMPOSE_FILE_PATH" logs "$TEST_SERVICE"
+          docker composelogs "$TEST_SERVICE"
 
       # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
       # git resolve that URL to this fork (PR refs live here). Also give git an
@@ -111,7 +113,7 @@ jobs:
       # DELETE this step when the workflow moves upstream.
       - name: Point dmwm/WMCore at this fork
         run: |
-          docker compose -f "$COMPOSE_FILE_PATH" exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
+          docker composeexec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
@@ -124,7 +126,7 @@ jobs:
           ok=0
           for attempt in 1 2 3 4 5; do
             echo "Attempt $attempt: testing slice $SLICE of $SLICES for build $BUILD_ID"
-            if docker compose -f "$COMPOSE_FILE_PATH" exec -T -u "$MY_ID" \
+            if docker composeexec -T -u "$MY_ID" \
                  -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
                  -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                  "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
@@ -145,7 +147,7 @@ jobs:
       - name: Stop containers
         if: always()
         run: |
-          [ -n "$COMPOSE_FILE_PATH" ] && docker compose -f "$COMPOSE_FILE_PATH" down || true
+          [ -n "$COMPOSE_FILE" ] && docker composedown || true
 
   pylint:
     runs-on: [self-hosted, Linux, X64]
@@ -162,20 +164,20 @@ jobs:
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
 
       - name: Prepare workspace (fork twin of setup-env.sh)
         run: bash wmcore-src/.github/ci/setup-env-gha.sh
 
       - name: Start pylint container
         run: |
-          docker compose -f "$COMPOSE_FILE_PATH" up --quiet-pull -d wmcore-pr-pylint
+          docker composeup --quiet-pull -d wmcore-pr-pylint
           docker ps
 
       # same fork redirect as in unit-tests; delete when moving upstream
       - name: Point dmwm/WMCore at this fork
         run: |
-          docker compose -f "$COMPOSE_FILE_PATH" exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
+          docker composeexec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
@@ -183,7 +185,7 @@ jobs:
 
       - name: Run pylint and pycodestyle (unchanged script)
         run: |
-          docker compose -f "$COMPOSE_FILE_PATH" exec -T \
+          docker composeexec -T \
             -e ghprbPullId="$ghprbPullId" -e ghprbTargetBranch="$ghprbTargetBranch" \
             -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
@@ -201,7 +203,7 @@ jobs:
       - name: Stop containers
         if: always()
         run: |
-          [ -n "$COMPOSE_FILE_PATH" ] && docker compose -f "$COMPOSE_FILE_PATH" down || true
+          [ -n "$COMPOSE_FILE" ] && docker composedown || true
 
   summary:
     needs: [unit-tests, pylint]
