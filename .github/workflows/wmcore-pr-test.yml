@@ -70,7 +70,8 @@ jobs:
       - name: Checkout WMCore-Jenkins (pinned, scripts reused unchanged)
         run: |
           rm -rf wmcore-jenkins
-          git clone --no-tags https://github.com/dmwm/WMCore-Jenkins.git wmcore-jenkins
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
+            git clone --no-tags https://github.com/dmwm/WMCore-Jenkins.git wmcore-jenkins
           git -C wmcore-jenkins checkout --detach b203d87308ef65c54945e1a6bed3940445a696c3
 
       - name: Checkout this repo (CI glue)
@@ -162,7 +163,8 @@ jobs:
       - name: Checkout WMCore-Jenkins (pinned, scripts reused unchanged)
         run: |
           rm -rf wmcore-jenkins
-          git clone --no-tags https://github.com/dmwm/WMCore-Jenkins.git wmcore-jenkins
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null GIT_TERMINAL_PROMPT=0 \
+            git clone --no-tags https://github.com/dmwm/WMCore-Jenkins.git wmcore-jenkins
           git -C wmcore-jenkins checkout --detach b203d87308ef65c54945e1a6bed3940445a696c3
 
       - name: Checkout this repo (CI glue)
