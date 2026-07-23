@@ -3,8 +3,10 @@
 # This mirrors dmwm/WMCore-Jenkins (WMCore-PR-test/Jenkinsfile and
 # WMCore-PR-pylint) as closely as possible:
 #   - same images and tags (wmcore-dev, MariaDB, CouchDB)
-#   - the compose file and every test/lint script run UNCHANGED from a
-#     checkout of dmwm/WMCore-Jenkins pinned at commit b203d873
+#   - the docker-compose file is a verbatim vendored copy of
+#     WMCore-Test-Base/docker-compose.yml at commit b203d873 (that repo is
+#     private, so CI cannot fetch it); the test and lint scripts run
+#     UNCHANGED from inside the wmcore-dev image
 #   - same test command, same 12 slices, same 5 retries per slice
 #
 # Differences, on purpose (fork testing phase):
@@ -65,20 +67,6 @@ jobs:
     env:
       SLICE: ${{ matrix.slice }}
     steps:
-      # tarball download instead of git: the job token cannot read other repos
-      # (checkout@v4 got "not found") and anonymous git-over-https from this VM
-      # demands credentials (shared-IP throttling / host netrc). The tarball
-      # needs no git and no auth, and keeps the same commit pin.
-      - name: Fetch WMCore-Jenkins (pinned, scripts reused unchanged)
-        run: |
-          rm -rf wmcore-jenkins wmcore-jenkins.tar.gz
-          curl -fsSL --retry 3 -o wmcore-jenkins.tar.gz \
-            https://codeload.github.com/dmwm/WMCore-Jenkins/tar.gz/b203d87308ef65c54945e1a6bed3940445a696c3
-          mkdir wmcore-jenkins
-          tar -xzf wmcore-jenkins.tar.gz -C wmcore-jenkins --strip-components=1
-          rm wmcore-jenkins.tar.gz
-          ls wmcore-jenkins
-
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
@@ -90,7 +78,7 @@ jobs:
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-jenkins/WMCore-Test-Base/docker-compose.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
           docker version
           docker compose version
 
@@ -163,20 +151,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     steps:
-      # tarball download instead of git: the job token cannot read other repos
-      # (checkout@v4 got "not found") and anonymous git-over-https from this VM
-      # demands credentials (shared-IP throttling / host netrc). The tarball
-      # needs no git and no auth, and keeps the same commit pin.
-      - name: Fetch WMCore-Jenkins (pinned, scripts reused unchanged)
-        run: |
-          rm -rf wmcore-jenkins wmcore-jenkins.tar.gz
-          curl -fsSL --retry 3 -o wmcore-jenkins.tar.gz \
-            https://codeload.github.com/dmwm/WMCore-Jenkins/tar.gz/b203d87308ef65c54945e1a6bed3940445a696c3
-          mkdir wmcore-jenkins
-          tar -xzf wmcore-jenkins.tar.gz -C wmcore-jenkins --strip-components=1
-          rm wmcore-jenkins.tar.gz
-          ls wmcore-jenkins
-
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
@@ -188,7 +162,7 @@ jobs:
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-jenkins/WMCore-Test-Base/docker-compose.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE_PATH=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
 
       - name: Prepare workspace (fork twin of setup-env.sh)
         run: bash wmcore-src/.github/ci/setup-env-gha.sh
