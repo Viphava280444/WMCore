@@ -27,10 +27,9 @@ services:
     volumes:
       - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
       - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
-      - type: tmpfs
-        target: /data/srv/mariadb/current/install/database
-        tmpfs:
-          size: 2147483648
+      # same target as the vendored bind, so it replaces it: database on the
+      # host RAM disk, pre-created by setup-env-gha.sh with runner ownership
+      - "/dev/shm/wmci-mariadb-${MY_ID}:/data/srv/mariadb/current/install/database"
 
   couchdb:
     volumes:

@@ -51,6 +51,13 @@ MDB_USER=unittestagent
 MDB_PASS=passwd
 EOF
 
+# MariaDB data on RAM via /dev/shm: docker's own tmpfs mounts are root-owned
+# and the image's chown as the runner user fails on them, so bind a host RAM
+# directory owned by the runner user instead
+MDB_SHM_DIR="/dev/shm/wmci-mariadb-$(id -u)"
+rm -rf "$MDB_SHM_DIR"
+mkdir -p "$MDB_SHM_DIR"
+
 # containers resolve the runner uid through these generated files (the VM
 # account comes from sssd and is absent from the host /etc/passwd); this
 # reuses WMCore-Jenkins/WMCore-PR-test/setup-users.sh unchanged
