@@ -42,7 +42,11 @@ RUCIO_AUTH=https://cms-rucio-auth.cern.ch
 GRAFANA_TOKEN=test_fake_token
 EOF
 
+# the wmagent-mariadb image's manage script requires MDB_ROOT and MDB_ROOTPASS
+# here (root account), and MDB_USER/MDB_PASS from WMAgent.secrets above
 cat > "$WORKSPACE"/admin/mariadb/MariaDB.secrets <<'EOF'
+MDB_ROOT=root
+MDB_ROOTPASS=passwd
 MDB_USER=unittestagent
 MDB_PASS=passwd
 EOF
