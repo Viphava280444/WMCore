@@ -14,6 +14,18 @@ x-wmj-mount: &wmj-mount
     - "${WMCORE_JENKINS_HOST_DIR:-/data/vkhlaisu/WMCore-Jenkins}:/home/cmsbld/WMCore-Jenkins:ro"
 
 services:
+  # MariaDB data on a RAM disk: the tests recreate and wipe the database after
+  # every test, which is sync-write-bound on the VM's virtio disk (measured:
+  # 45+ min per slice vs Jenkins' 30-min budget). The long-form mount below
+  # has the same target as the bind in the vendored file, so it replaces it.
+  # The database is throwaway per run - losing it on stop is the point.
+  mariadb:
+    volumes:
+      - type: tmpfs
+        target: /data/srv/mariadb/current/install/database
+        tmpfs:
+          size: 2147483648
+
   wmcore-pr-test:
     <<: *wmj-mount
   wmcore-pr-pylint:
