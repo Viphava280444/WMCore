@@ -42,14 +42,22 @@ RUCIO_AUTH=https://cms-rucio-auth.cern.ch
 GRAFANA_TOKEN=test_fake_token
 EOF
 
-# the wmagent-mariadb image's manage script requires MDB_ROOT and MDB_ROOTPASS
-# here (root account), and MDB_USER/MDB_PASS from WMAgent.secrets above
-cat > "$WORKSPACE"/admin/mariadb/MariaDB.secrets <<'EOF'
-MDB_ROOT=root
+# the wmagent-mariadb image checks that the OS user running the container
+# matches MDB_ROOT from this file, so write the real runner username
+cat > "$WORKSPACE"/admin/mariadb/MariaDB.secrets <<EOF
+MDB_ROOT=$(id -un)
 MDB_ROOTPASS=passwd
 MDB_USER=unittestagent
 MDB_PASS=passwd
 EOF
+
+# containers resolve the runner uid through these generated files (the VM
+# account comes from sssd and is absent from the host /etc/passwd); this
+# reuses WMCore-Jenkins/WMCore-PR-test/setup-users.sh unchanged
+if [ -n "${WMCORE_JENKINS_HOST_DIR:-}" ] && [ -f "$WMCORE_JENKINS_HOST_DIR/WMCore-PR-test/setup-users.sh" ]; then
+    MY_USER="$(id -un)" MY_GROUP="$(id -g)" HOST_MOUNT_DIR="$WORKSPACE" \
+        bash "$WMCORE_JENKINS_HOST_DIR/WMCore-PR-test/setup-users.sh"
+fi
 
 # self-signed certificate pair instead of real grid certs (dummy, 30 days)
 openssl req -x509 -newkey rsa:2048 -nodes -days 30 \

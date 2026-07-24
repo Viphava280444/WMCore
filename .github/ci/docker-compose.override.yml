@@ -9,9 +9,13 @@
 #
 # Not needed upstream: dmwm runners can clone the repo directly.
 
+# the generated passwd/group (setup-users.sh) replace the host files by
+# mount target, so containers can resolve the sssd runner account
 x-wmj-mount: &wmj-mount
   volumes:
     - "${WMCORE_JENKINS_HOST_DIR:-/data/vkhlaisu/WMCore-Jenkins}:/home/cmsbld/WMCore-Jenkins:ro"
+    - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+    - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
 
 services:
   # MariaDB data on a RAM disk: the tests recreate and wipe the database after
@@ -21,10 +25,17 @@ services:
   # The database is throwaway per run - losing it on stop is the point.
   mariadb:
     volumes:
+      - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+      - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
       - type: tmpfs
         target: /data/srv/mariadb/current/install/database
         tmpfs:
           size: 2147483648
+
+  couchdb:
+    volumes:
+      - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+      - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
 
   wmcore-pr-test:
     <<: *wmj-mount
