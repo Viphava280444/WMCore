@@ -1,0 +1,250 @@
+# WMCore baseline test run, migrated from Jenkins.
+#
+# Fork twin of two Jenkins jobs in dmwm/WMCore-Jenkins:
+#   - WMCore-TagBaseline (ContainerScripts/tagLatestWMCore.sh): tag master as
+#     JENKINS_<timestamp> and push it. PR test runs merge the PR onto the
+#     newest JENKINS_* tag they can see (TestScripts/test-wmcorepy3.sh), so
+#     this tag pins the same base commit the baseline tested.
+#   - WMCore-unittests-baseline: run the full 12-slice unit test suite on
+#     master and keep the nosetests XML files. The PR report job downloads
+#     them from the latest successful run of this workflow as its
+#     "MasterUnitTests" baseline (Jenkins: copyArtifacts lastSuccessful).
+#
+# Why this exists: PullRequestReport.py only flags tests that CHANGED between
+# baseline and PR. A test failing in both runs does not count against the PR.
+# This baseline runs with the same dummy secrets and self-signed certificate
+# as the PR runs (the fork stores no credentials), so environment-caused
+# failures appear on both sides and cancel out in the comparison.
+#
+# Differences from Jenkins, on purpose:
+#   - WMCore-Aggregate-Baseline is not ported: in the current Jenkins config
+#     its MasterUnitTests directory is never populated, so its CompareTests.py
+#     "Daily" mode degenerates to listing every test. Its useful outputs
+#     (test trend, latest tag) are covered here by the run summary and the
+#     pushed JENKINS_* tag.
+#   - No retry around slices: the Jenkins baseline runs each slice once
+#     (only the PR job wraps slices in retry(5)), so this does the same.
+#   - Old JENKINS_* tags are pruned after 7 days (the live Jenkins also
+#     removes previous days' tags; upstream keeps a few days around).
+#
+# The cron mirrors the live Jenkins cadence (fresh tags appear upstream about
+# 04:21 and 15:21 CERN time). GitHub only fires cron from the default branch,
+# so the schedule is inactive while this file lives on a feature branch;
+# workflow_dispatch is the trigger until then.
+
+name: WMCore baseline
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '21 2,13 * * *'
+
+permissions:
+  contents: write   # push and prune the JENKINS_<timestamp> tags
+
+concurrency:
+  group: wmcore-baseline
+  cancel-in-progress: false
+
+env:
+  # same environment as wmcore-pr-test.yml on purpose: the comparison in
+  # PullRequestReport.py is only meaningful when baseline and PR runs share it
+  WMA_TAG: '2.3.3'
+  COUCH_TAG: '3.2.2'
+  MDB_TAG: '10.6.19'
+  # Jenkins WMCore-unittests-baseline uses the wmcore-unittests compose
+  # service (same wmcore-dev image; its compose entry takes no ghprbPullId,
+  # which keeps test-wmcorepy3.sh in plain-master mode: no PR merge)
+  TEST_SERVICE: 'wmcore-unittests'
+  SLICES: '12'
+  WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
+  BUILD_ID: ${{ github.run_id }}
+  # compose interpolates these for other services; empty on baseline runs
+  ghprbPullId: ''
+  ghprbTargetBranch: ''
+  WMA_CONFIG_FILE: ''
+  DMWMBOT_TOKEN: ''
+  WMCORE_JENKINS_ORG: dmwm
+  WMCORE_JENKINS_REF: main
+  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file
+  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
+
+jobs:
+  # fork twin of WMCore-TagBaseline + tagLatestWMCore.sh. Observed live tag
+  # format on dmwm/WMCore: JENKINS_YYYYmmddHHMMSS, twice a day.
+  tag-baseline:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+
+      - name: Tag baseline
+        run: |
+          TAG="JENKINS_$(date -u +%Y%m%d%H%M%S)"
+          git tag "$TAG"
+          git push origin "$TAG"
+          echo "Pushed baseline tag $TAG at commit $(git rev-parse HEAD)"
+
+      # deleting a remote tag only needs its name, so work from ls-remote and
+      # never touch anything that does not match the JENKINS_<14 digits> shape
+      - name: Prune baseline tags older than 7 days
+        run: |
+          cutoff=$(date -u -d '7 days ago' +%Y%m%d%H%M%S)
+          git ls-remote --tags origin 'JENKINS_*' | awk '{print $2}' | sed 's|^refs/tags/||' \
+            | grep -E '^JENKINS_[0-9]{14}$' | while read -r tag; do
+              stamp=${tag#JENKINS_}
+              if [ "$stamp" -lt "$cutoff" ]; then
+                git push --delete origin "$tag" && echo "Pruned old baseline tag $tag"
+              fi
+            done
+
+  # fork twin of WMCore-unittests-baseline: same container startup as the PR
+  # unit tests, but no ghprbPullId anywhere, so the unchanged test script
+  # tests plain master (which the fork redirect points at this fork's master)
+  unit-tests:
+    needs: tag-baseline
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    env:
+      SLICE: ${{ matrix.slice }}
+    steps:
+      - name: Checkout this repo (CI glue)
+        uses: actions/checkout@v4
+        with:
+          path: wmcore-src
+
+      - name: Runtime environment
+        run: |
+          echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
+          echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
+          echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
+          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          docker version
+          docker compose version
+
+      - name: Prepare workspace (fork twin of setup-env.sh)
+        run: bash wmcore-src/.github/ci/setup-env-gha.sh
+
+      - name: Stop leftover containers
+        run: |
+          [ -n "$COMPOSE_FILE" ] && docker compose down --remove-orphans || true
+
+      # same startup sequence as the Jenkinsfile
+      - name: Start containers
+        run: |
+          docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
+          sleep 20
+          docker ps
+          echo "--Check MariaDB docker logs"
+          docker compose logs mariadb
+          echo "--Check CouchDB docker logs"
+          docker compose logs couchdb
+          echo "--Check CouchDB certificates"
+          docker compose exec -T couchdb ls -l /data/certs
+          docker compose exec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
+          echo "--Check wmcore-unittest logs"
+          docker compose logs "$TEST_SERVICE"
+
+      # the image entrypoint clones WMCore + copies the CI scripts at container
+      # start; wait until that setup is really done
+      - name: Wait for container CI setup
+        run: |
+          ready=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
+            sleep 5
+          done
+          if [ -z "$ready" ]; then
+            echo "Entrypoint setup did not finish in time; container logs:"
+            docker compose logs "$TEST_SERVICE"
+            exit 1
+          fi
+          docker compose logs "$TEST_SERVICE"
+
+      # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
+      # git resolve that URL to this fork. In baseline mode the script only
+      # does `git pull origin master`, which this points at the fork's master.
+      # DELETE this step when the workflow moves upstream.
+      - name: Point dmwm/WMCore at this fork
+        run: |
+          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
+            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
+            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"
+            cat "$GIT_CONFIG_GLOBAL"'
+
+      # single attempt, like the Jenkins baseline; note: no ghprbPullId here
+      - name: Run test slice
+        run: |
+          echo "Baseline: testing slice $SLICE of $SLICES for build $BUILD_ID"
+          docker compose exec -T -u "$MY_ID" \
+            -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
+            -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nosetests-slice-${{ matrix.slice }}
+          path: ci-workspace/artifacts/nosetests*.xml
+          if-no-files-found: warn
+
+      - name: Stop containers
+        if: always()
+        run: |
+          [ -n "$COMPOSE_FILE" ] && docker compose down || true
+
+  summary:
+    needs: unit-tests
+    if: always()
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      # the workspace persists between runs on a self-hosted runner; drop
+      # stale results so the counts only cover this run
+      - name: Clean stale results
+        run: rm -rf results
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+
+      - name: Write run summary
+        run: |
+          python3 - <<'EOF'
+          import glob, os
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+          tests = failures = errors = skipped = 0
+          for f in glob.glob('results/**/nosetests*.xml', recursive=True):
+              try:
+                  suite = ET.parse(f).getroot()
+              except ET.ParseError:
+                  continue
+              suites = [suite] if suite.tag == 'testsuite' else suite.findall('testsuite')
+              for s in suites:
+                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
+                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
+          lines = ['## WMCore baseline results', '',
+                   f'| Tests | Failures | Errors | Skipped |',
+                   f'|---|---|---|---|',
+                   f'| {tests} | {failures} | {errors} | {skipped} |', '',
+                   'These results are the comparison base for PR reports '
+                   '(tests failing here are not counted against PRs).', '']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(lines) + '\n')
+          EOF
