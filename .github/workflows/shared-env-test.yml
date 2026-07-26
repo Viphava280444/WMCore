@@ -1,0 +1,10 @@
+# Dispatch stub: real jobs live on branch ci-improve-exp (that branch's copy).
+# Exists on master only so `--ref ci-improve-exp` is dispatchable.
+name: Shared env test
+on:
+  workflow_dispatch:
+jobs:
+  pointer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Real version on branch ci-improve-exp"
