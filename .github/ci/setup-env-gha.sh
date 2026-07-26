@@ -66,11 +66,29 @@ if [ -n "${WMCORE_JENKINS_HOST_DIR:-}" ] && [ -f "$WMCORE_JENKINS_HOST_DIR/WMCor
         bash "$WMCORE_JENKINS_HOST_DIR/WMCore-PR-test/setup-users.sh"
 fi
 
-# self-signed certificate pair instead of real grid certs (dummy, 30 days)
-openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
-    -subj "/CN=wmcore-fork-ci" \
-    -keyout "$WORKSPACE"/certs/servicekey.pem \
-    -out "$WORKSPACE"/certs/servicecert.pem 2>/dev/null
+# real credentials, when present on the runner VM (fork twin of the Jenkins
+# agent copying grid certificates from /home/cmsbld/.globus): a VM-local
+# directory OUTSIDE the repository provides the user's grid certificate pair
+# and rucio account name. The repository stays secret-free - when the
+# directory is absent, CI falls back to the self-signed dummy pair, and the
+# baseline comparison still forgives the resulting environment failures.
+CI_SECRETS_DIR="${WMCI_SECRETS_DIR:-/data/vkhlaisu/ci-secrets}"
+if [ -f "$CI_SECRETS_DIR/usercert.pem" ] && [ -f "$CI_SECRETS_DIR/userkey.pem" ]; then
+    echo "Using grid certificate pair from $CI_SECRETS_DIR"
+    cp "$CI_SECRETS_DIR/usercert.pem" "$WORKSPACE"/certs/servicecert.pem
+    cp "$CI_SECRETS_DIR/userkey.pem"  "$WORKSPACE"/certs/servicekey.pem
+    if [ -s "$CI_SECRETS_DIR/rucio_account.txt" ]; then
+        sed -i "s/^RUCIO_ACCOUNT=.*/RUCIO_ACCOUNT=$(head -1 "$CI_SECRETS_DIR/rucio_account.txt")/" \
+            "$WORKSPACE"/admin/wmagent/WMAgent.secrets
+    fi
+else
+    # self-signed certificate pair instead of real grid certs (dummy, 30 days)
+    echo "No CI secrets at $CI_SECRETS_DIR; generating a self-signed pair"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 30 \
+        -subj "/CN=wmcore-fork-ci" \
+        -keyout "$WORKSPACE"/certs/servicekey.pem \
+        -out "$WORKSPACE"/certs/servicecert.pem 2>/dev/null
+fi
 chmod 600 "$WORKSPACE"/certs/servicecert.pem
 chmod 400 "$WORKSPACE"/certs/servicekey.pem
 
