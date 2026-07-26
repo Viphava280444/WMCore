@@ -34,12 +34,10 @@
 
 name: WMCore baseline
 
-# NOTE (fork master copy): schedule intentionally removed - the CI glue in
-# .github/ci/ lives on the gha-pr-test branch, so scheduled runs from master
-# would fail their test jobs and push orphan JENKINS_* tags. The cron comes
-# back when that branch merges. Manual runs: dispatch with --ref gha-pr-test.
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '21 2,13 * * *'
 
 permissions:
   contents: write   # push and prune the JENKINS_<timestamp> tags

@@ -1,0 +1,448 @@
+# WMCore PR tests, migrated from Jenkins.
+#
+# This mirrors dmwm/WMCore-Jenkins (WMCore-PR-Report/Jenkinsfile as the
+# orchestrator, plus WMCore-PR-test and WMCore-PR-pylint) as closely as
+# possible. Jenkins stage -> job mapping:
+#   - "Update GitHub PR status" (PullRequestTestBegin.py)  -> job "begin"
+#   - WMCore-PR-test 12-slice matrix                       -> job "unit-tests"
+#   - WMCore-PR-pylint                                     -> job "pylint"
+#   - "Copy artifacts" + "Generate Reports"
+#     (PullRequestReport.py)                               -> job "report"
+#   - ghprb plugin's final build status ("default")        -> last step of "report"
+#   - same images and tags (wmcore-dev, MariaDB, CouchDB)
+#   - the docker-compose file is a verbatim vendored copy of
+#     WMCore-Test-Base/docker-compose.yml at commit b203d873 (that repo is
+#     private, so CI cannot fetch it); the test, lint, and report scripts run
+#     UNCHANGED (tests/lint inside the wmcore-dev image; report scripts from
+#     the VM-local WMCore-Jenkins clone, like Jenkins runs them on the agent)
+#   - same test command, same 12 slices, same 5 retries per slice
+#
+# Differences, on purpose (fork testing phase):
+#   - runs on the fork's self-hosted runner; slices run one after another
+#   - dummy secrets and a self-signed cert (.github/ci/setup-env-gha.sh);
+#     the fork stores no secrets at all
+#   - DMWMBOT_TOKEN for the report scripts is the workflow's own GITHUB_TOKEN
+#     (comments and statuses appear from github-actions[bot], not dmwm-bot)
+#   - one step redirects git URLs from dmwm/WMCore to this fork, because the
+#     unchanged scripts hardcode dmwm/WMCore for fetching PR refs.
+#     Delete that step when this workflow moves upstream.
+#   - UnstableTests.txt comes from this fork's master (Jenkins curls it from
+#     dmwm master; same file)
+#   - BUILD_URL ends with '#': PullRequestReport.py appends the Jenkins
+#     artifact path to it, and the '#' keeps that as a harmless URL fragment,
+#     so links land on the Actions run page (the report html is an artifact)
+#   - Jenkins skips the report when the pylint BUILD infra-fails (its trigger
+#     has no propagate:false); here the report still runs and reports the
+#     sections it has artifacts for
+#   - images are kept in the local docker cache between runs (Jenkins wiped
+#     them with --rmi all on every cell)
+
+name: WMCore PR tests
+
+on:
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to test'
+        required: true
+      slices:
+        description: 'JSON list of slices to run'
+        required: false
+        default: '[0,1,2,3,4,5,6,7,8,9,10,11]'
+
+concurrency:
+  group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: true
+
+# what the unchanged report scripts need: statuses (PullRequestTestBegin.py,
+# PullRequestReport.py, ghprb twin), the PR comment (issues API), and reading
+# baseline artifacts from another workflow's run
+permissions:
+  contents: read
+  statuses: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+env:
+  # same values as WMCore-PR-test/Jenkinsfile
+  WMA_TAG: '2.3.3'
+  COUCH_TAG: '3.2.2'
+  MDB_TAG: '10.6.19'
+  TEST_SERVICE: 'wmcore-pr-test'
+  SLICES: '12'
+  # Jenkins job parameter; current -stable tag on registry.cern.ch/cmsweb/wmcore-dev
+  WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
+  # Jenkins ghprb plugin equivalents
+  ghprbPullId: ${{ github.event.pull_request.number || inputs.pr_number }}
+  ghprbTargetBranch: ${{ github.base_ref || 'master' }}
+  BUILD_ID: ${{ github.run_id }}
+  # Jenkins BUILD_URL equivalent; the trailing '#' is explained in the header
+  BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
+  DMWMBOT_TOKEN: ''
+  WMCORE_JENKINS_ORG: dmwm
+  WMCORE_JENKINS_REF: main
+  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file
+  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
+
+jobs:
+  # fork twin of WMCore-PR-Report stage "Update GitHub PR status": the
+  # unchanged PullRequestTestBegin.py posts a 'pending' commit status. It
+  # passes no context, so GitHub names the status "default" - that is where
+  # the third status on real dmwm PRs comes from. Script and interpreter live
+  # on the runner VM (Jenkins also runs it on the agent, not in a container).
+  begin:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      - name: Report tests started (unchanged PullRequestTestBegin.py)
+        env:
+          DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WMCORE_REPO: ${{ github.repository_owner }}
+          CODE_REPO: WMCore
+        run: |
+          python3 -m venv "$RUNNER_TEMP/report-venv"
+          "$RUNNER_TEMP/report-venv/bin/pip" -q install PyGithub
+          "$RUNNER_TEMP/report-venv/bin/python" \
+            "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestTestBegin.py"
+
+  unit-tests:
+    needs: begin
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        slice: ${{ fromJSON(inputs.slices || '[0,1,2,3,4,5,6,7,8,9,10,11]') }}
+    env:
+      SLICE: ${{ matrix.slice }}
+    steps:
+      - name: Checkout this repo (CI glue)
+        uses: actions/checkout@v4
+        with:
+          path: wmcore-src
+
+      - name: Runtime environment
+        run: |
+          echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
+          echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
+          echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
+          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          docker version
+          docker compose version
+
+      - name: Prepare workspace (fork twin of setup-env.sh)
+        run: bash wmcore-src/.github/ci/setup-env-gha.sh
+
+      - name: Stop leftover containers
+        run: |
+          [ -n "$COMPOSE_FILE" ] && docker compose down --remove-orphans || true
+
+      # same startup sequence as the Jenkinsfile
+      - name: Start containers
+        run: |
+          docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
+          sleep 20
+          docker ps
+          echo "--Check MariaDB docker logs"
+          docker compose logs mariadb
+          echo "--Check CouchDB docker logs"
+          docker compose logs couchdb
+          echo "--Check CouchDB certificates"
+          docker compose exec -T couchdb ls -l /data/certs
+          docker compose exec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
+          echo "--Check wmcore-unittest logs"
+          docker compose logs "$TEST_SERVICE"
+
+      # the image entrypoint clones WMCore + copies the CI scripts at container
+      # start; wait until that setup is really done (replaces guessing with a
+      # readiness check - Jenkins' sleep 20 served the same purpose)
+      - name: Wait for container CI setup
+        run: |
+          ready=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
+            sleep 5
+          done
+          if [ -z "$ready" ]; then
+            echo "Entrypoint setup did not finish in time; container logs:"
+            docker compose logs "$TEST_SERVICE"
+            exit 1
+          fi
+          docker compose logs "$TEST_SERVICE"
+
+      # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
+      # git resolve that URL to this fork (PR refs live here). Also give git an
+      # identity and safe.directory for the uid-mapped exec user.
+      # DELETE this step when the workflow moves upstream.
+      - name: Point dmwm/WMCore at this fork
+        run: |
+          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
+            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
+            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"
+            cat "$GIT_CONFIG_GLOBAL"'
+
+      # same as the Jenkinsfile: retry(5) around the unchanged test script
+      - name: Run test slice
+        run: |
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            echo "Attempt $attempt: testing slice $SLICE of $SLICES for build $BUILD_ID"
+            if docker compose exec -T -u "$MY_ID" \
+                 -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
+                 -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+                 "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
+              ok=1; break
+            fi
+            sleep 5
+          done
+          test "$ok" = 1
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nosetests-slice-${{ matrix.slice }}
+          path: ci-workspace/artifacts/nosetests*.xml
+          if-no-files-found: warn
+
+      - name: Stop containers
+        if: always()
+        run: |
+          [ -n "$COMPOSE_FILE" ] && docker compose down || true
+
+  pylint:
+    needs: begin
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout this repo (CI glue)
+        uses: actions/checkout@v4
+        with:
+          path: wmcore-src
+
+      - name: Runtime environment
+        run: |
+          echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
+          echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
+          echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
+          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+
+      - name: Prepare workspace (fork twin of setup-env.sh)
+        run: bash wmcore-src/.github/ci/setup-env-gha.sh
+
+      - name: Start pylint container
+        run: |
+          docker compose up --quiet-pull -d wmcore-pr-pylint
+          docker ps
+
+      # same readiness wait as in unit-tests: the entrypoint needs time to
+      # clone WMCore and copy the CI scripts before we can exec them
+      - name: Wait for container CI setup
+        run: |
+          ready=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T wmcore-pr-pylint test -f /home/cmsbld/TestScripts/pylintPRTest.sh; then ready=1; break; fi
+            sleep 5
+          done
+          if [ -z "$ready" ]; then
+            echo "Entrypoint setup did not finish in time; container logs:"
+            docker compose logs wmcore-pr-pylint
+            exit 1
+          fi
+          docker compose logs wmcore-pr-pylint
+
+      # same fork redirect as in unit-tests; delete when moving upstream
+      - name: Point dmwm/WMCore at this fork
+        run: |
+          docker compose exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
+            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
+            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
+
+      - name: Run pylint and pycodestyle (unchanged script)
+        run: |
+          docker compose exec -T \
+            -e ghprbPullId="$ghprbPullId" -e ghprbTargetBranch="$ghprbTargetBranch" \
+            -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
+
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            ci-workspace/artifacts/pylintpy3Report.json
+            ci-workspace/artifacts/pep8py3.txt
+          if-no-files-found: warn
+
+      - name: Stop containers
+        if: always()
+        run: |
+          [ -n "$COMPOSE_FILE" ] && docker compose down || true
+
+  # fork twin of WMCore-PR-Report stages "Copy artifacts" + "Generate Reports".
+  # Jenkins runs the unchanged PullRequestReport.py on the agent in a venv;
+  # this job does the same on the runner VM. It compares this run's XMLs
+  # (LatestUnitTests) against the newest successful baseline run
+  # (MasterUnitTests, Jenkins: copyArtifacts lastSuccessful), then posts the
+  # "Jenkins results:" comment and the Py3 Unit tests / Py3 Pylint statuses.
+  # Like Jenkins (propagate: false), it runs even when unit tests failed.
+  report:
+    needs: [begin, unit-tests, pylint]
+    if: ${{ !cancelled() && needs.begin.result == 'success' }}
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      # twin of the WMCore-PR-Report "Setup" stage (cleanWs + venv +
+      # UnstableTests.txt); the workspace persists between runs on a
+      # self-hosted runner, so stale results MUST be removed before the
+      # downloads below (file names embed the run id and would accumulate).
+      # Unstable-test list read from this fork's master instead of dmwm master.
+      - name: Set up report environment
+        run: |
+          rm -rf report-venv LatestUnitTests LatestPylint MasterUnitTests artifacts UnstableTests.txt
+          python3 -m venv report-venv
+          report-venv/bin/pip -q install jinja2 xunitparser PyGithub
+          curl -sf -o UnstableTests.txt \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/test/etc/UnstableTests.txt"
+          mkdir -p artifacts
+
+      # these two tolerate missing artifacts (e.g. a job died before its
+      # upload): PullRequestReport.py skips report sections it has no input
+      # for. The baseline fetch below stays strict - no baseline, no report.
+      - name: Fetch PR test results (LatestUnitTests)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nosetests-slice-*
+          path: LatestUnitTests
+
+      - name: Fetch lint results (LatestPylint)
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lint-reports
+          path: LatestPylint
+
+      # Jenkins: copyArtifacts projectName 'WMCore-Unittest-Baseline',
+      # selector lastSuccessful()
+      - name: Find latest successful baseline run
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_id=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/wmcore-baseline.yml/runs?status=success&per_page=1" \
+            | python3 -c 'import json,sys; runs=json.load(sys.stdin)["workflow_runs"]; print(runs[0]["id"] if runs else "")')
+          if [ -z "$run_id" ]; then
+            echo "No successful baseline run found. Run the 'WMCore baseline' workflow first" \
+                 "(Jenkins equivalent: WMCore-Unittest-Baseline lastSuccessful)." >&2
+            exit 1
+          fi
+          echo "Using baseline from run $run_id"
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch baseline results (MasterUnitTests)
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nosetests-slice-*
+          path: MasterUnitTests
+          run-id: ${{ steps.baseline.outputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # twin of "Generate Reports": unchanged script, jinja templates from the
+      # VM-local WMCore-Jenkins clone (Jenkins checks the same repo out into
+      # its workspace). Posts the comment + the two named commit statuses.
+      - name: Generate report and update PR (unchanged PullRequestReport.py)
+        env:
+          DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WMCORE_REPO: ${{ github.repository_owner }}
+          CODE_REPO: WMCore
+          JENKINS_JINJA_TEMPLATE_PATH: ${{ env.WMCORE_JENKINS_HOST_DIR }}/templates
+        run: |
+          report-venv/bin/python \
+            "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestReport.py"
+
+      - name: Upload PR report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-report
+          path: artifacts/PullRequestReport.html
+          if-no-files-found: warn
+
+      # twin of the ghprb plugin behavior: Jenkins' PR builder flips the
+      # "default" status (set to pending by the begin job) to the build
+      # outcome when WMCore-PR-Report finishes. Posting without "context"
+      # makes GitHub use the name "default", same as the begin script.
+      - name: Finish default status (ghprb twin)
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          state=failure
+          [ "${{ job.status }}" = "success" ] && state=success
+          if [ -z "$HEAD_SHA" ]; then
+            HEAD_SHA=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ghprbPullId}" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          fi
+          curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
+            -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
+
+  summary:
+    needs: [unit-tests, pylint]
+    if: always()
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    steps:
+      # the workspace persists between runs on a self-hosted runner; drop
+      # stale results so the counts only cover this run
+      - name: Clean stale results
+        run: rm -rf results
+
+      - name: Download all results
+        uses: actions/download-artifact@v4
+        with:
+          path: results
+
+      - name: Write run summary
+        run: |
+          python3 - <<'EOF'
+          import glob, os
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+          tests = failures = errors = skipped = 0
+          for f in glob.glob('results/**/nosetests*.xml', recursive=True):
+              try:
+                  suite = ET.parse(f).getroot()
+              except ET.ParseError:
+                  continue
+              suites = [suite] if suite.tag == 'testsuite' else suite.findall('testsuite')
+              for s in suites:
+                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
+                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
+          lines = ['## WMCore PR test results', '',
+                   f'| Tests | Failures | Errors | Skipped |',
+                   f'|---|---|---|---|',
+                   f'| {tests} | {failures} | {errors} | {skipped} |', '']
+          if os.path.exists('results/lint-reports/pep8py3.txt'):
+              n = sum(1 for _ in open('results/lint-reports/pep8py3.txt'))
+              lines.append(f'pycodestyle: {n} comments to review (informational, like Jenkins)')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(lines) + '\n')
+          EOF

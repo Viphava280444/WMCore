@@ -1,0 +1,44 @@
+# Fork-runner override, used together with the vendored docker-compose.yml.
+#
+# dmwm/WMCore-Jenkins is a private repository, so the image entrypoint cannot
+# clone it at container start (it does: git clone .../WMCore-Jenkins, then
+# cp -r WMCore-Jenkins/{TestScripts,ContainerScripts} into /home/cmsbld).
+# Instead, a clone kept on the runner VM is mounted read-only at the same
+# place; the entrypoint's failed clone is harmless and its cp -r then copies
+# the scripts from the mount. Private code never leaves the CERN VM.
+#
+# Not needed upstream: dmwm runners can clone the repo directly.
+
+# the generated passwd/group (setup-users.sh) replace the host files by
+# mount target, so containers can resolve the sssd runner account
+x-wmj-mount: &wmj-mount
+  volumes:
+    - "${WMCORE_JENKINS_HOST_DIR:-/data/vkhlaisu/WMCore-Jenkins}:/home/cmsbld/WMCore-Jenkins:ro"
+    - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+    - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
+
+services:
+  # MariaDB data on a RAM disk: the tests recreate and wipe the database after
+  # every test, which is sync-write-bound on the VM's virtio disk (measured:
+  # 45+ min per slice vs Jenkins' 30-min budget). The long-form mount below
+  # has the same target as the bind in the vendored file, so it replaces it.
+  # The database is throwaway per run - losing it on stop is the point.
+  mariadb:
+    volumes:
+      - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+      - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
+      # same target as the vendored bind, so it replaces it: database on the
+      # host RAM disk, pre-created by setup-env-gha.sh with runner ownership
+      - "/dev/shm/wmci-mariadb-${MY_ID}:/data/srv/mariadb/current/install/database"
+
+  couchdb:
+    volumes:
+      - "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+      - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
+
+  wmcore-pr-test:
+    <<: *wmj-mount
+  wmcore-pr-pylint:
+    <<: *wmj-mount
+  wmcore-unittests:
+    <<: *wmj-mount
