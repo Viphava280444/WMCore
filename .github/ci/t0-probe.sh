@@ -31,3 +31,12 @@ echo "containers=${names:-none}"
 echo "container_count=$(docker ps -q 2>/dev/null | wc -l | tr -d ' ')"
 echo "unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
 echo "procs=$(ps -u cmst0 --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+
+# Everything below is printed for the log only -- the workflow parses the
+# key=value lines above and ignores the rest. A plain listing is the clearest
+# proof in the log that the Kerberos login really landed as cmst0 and can read
+# the Tier-0 area, rather than just reporting a summary line that says so.
+echo "--- ls -la /data/tier0 (first 20) ---"
+ls -la /data/tier0 2>&1 | head -20
+echo "--- ls -la /data/dockerMount/srv ---"
+ls -la /data/dockerMount/srv 2>&1 | head -10
