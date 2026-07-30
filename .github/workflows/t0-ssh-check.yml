@@ -1,0 +1,184 @@
+# Proves the self-hosted runner (vocms047) can log in to the Tier-0 hosts.
+#
+# WHY THIS EXISTS
+# The runner cannot SSH anywhere by default. It holds no Kerberos ticket of its
+# own, and its HOME is on AFS, which it cannot read without one. So key-based
+# login is out too: the target machines run sshd as root, root has no AFS token,
+# and the AFS permissions on the shared home are "list only" -- sshd can see
+# ~/.ssh/authorized_keys but cannot read it. Verified 2026-07-30: the correct
+# key was offered and still rejected.
+#
+# The one thing that does work is Kerberos, which is how an interactive login
+# already reaches those hosts. This workflow does that unattended: kinit from a
+# keytab, then log in and read a few facts. Running it on a schedule turns "SSH
+# works" from an assumption into something checked daily.
+#
+# CREDENTIAL
+# /data/vkhlaisu/ci-secrets/cmst0.keytab -- on the VM only, mode 400, never in
+# this repo. It is for the Tier-0 service account cmst0, chosen over a personal
+# keytab because cmst0 has no sudo: it can read what the Tier-0 stack owns and
+# nothing more. A personal keytab would have implied passwordless root on both
+# machines.
+#
+# WHY THERE IS NO pull_request TRIGGER
+# Every job on this runner can read that keytab. A workflow reachable from a
+# stranger's pull request would be a way to steal it. Manual and scheduled runs
+# only. The same reasoning argues for setting the fork's Actions policy to
+# require approval for ALL outside contributors, not just first-timers.
+name: T0 SSH check
+
+on:
+  workflow_dispatch:
+    inputs:
+      simulate_failure:
+        description: 'Force a failure, to confirm this check can actually go red'
+        type: choice
+        required: false
+        default: 'no'
+        options:
+          - 'no'
+          - 'bad-host'
+          - 'bad-keytab'
+  schedule:
+    # 06:00 UTC daily. Deliberately away from the wmcore-baseline crons
+    # (02:21 and 13:21) so the runner is not busy with a 57-minute test suite.
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: t0-ssh-check
+  cancel-in-progress: false
+
+env:
+  KEYTAB: /data/vkhlaisu/ci-secrets/cmst0.keytab
+  PRINCIPAL: cmst0@CERN.CH
+  T0_HOSTS: 'vocms0500.cern.ch vocms05012.cern.ch'
+
+jobs:
+  ssh-check:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify the keytab is present and readable
+        env:
+          SIMULATE: ${{ inputs.simulate_failure }}
+        run: |
+          keytab="$KEYTAB"
+          if [ "${SIMULATE:-no}" = "bad-keytab" ]; then
+            keytab=/data/vkhlaisu/ci-secrets/this-file-does-not-exist.keytab
+            echo "simulate_failure=bad-keytab: looking for $keytab instead"
+          fi
+          if [ ! -r "$keytab" ]; then
+            echo "::error::keytab not readable at $keytab"
+            echo "The runner runs as vkhlaisu, so the file must be owned by"
+            echo "vkhlaisu and readable by them (mode 400 is fine)."
+            exit 1
+          fi
+          # -k prints the account names and key versions only. No secret material.
+          klist -k "$keytab"
+
+      - name: Get a Kerberos ticket for cmst0
+        run: |
+          CC="$RUNNER_TEMP/krb5cc_ci"
+          # Keep the ticket out of the shared keyring cache the login session
+          # uses, so this job can never disturb an interactive session.
+          echo "KRB5CCNAME=FILE:$CC" >> "$GITHUB_ENV"
+          export KRB5CCNAME="FILE:$CC"
+          kinit -kt "$KEYTAB" "$PRINCIPAL"
+          klist
+
+      - name: Check each Tier-0 host
+        env:
+          SIMULATE: ${{ inputs.simulate_failure }}
+        run: |
+          set -uo pipefail
+
+          # HOME points at AFS and is unreadable here. Give ssh a real directory
+          # so nothing it does falls back to an inaccessible path.
+          export HOME="$RUNNER_TEMP/cihome"
+          mkdir -p "$HOME"
+
+          KH="$GITHUB_WORKSPACE/.github/ci/t0-hosts.known_hosts"
+          PROBE="$GITHUB_WORKSPACE/.github/ci/t0-probe.sh"
+
+          # -F none skips every ssh config file, including the one on AFS. That
+          # also drops CERN's system-wide "GSSAPIAuthentication yes", so it has
+          # to be set here explicitly -- without it every login is refused.
+          SSHOPTS=(
+            -o BatchMode=yes
+            -o ConnectTimeout=10
+            -o GSSAPIAuthentication=yes
+            -o PreferredAuthentications=gssapi-with-mic,gssapi-keyex
+            -o GSSAPIDelegateCredentials=no
+            -F none
+            -o UserKnownHostsFile="$KH"
+            -o StrictHostKeyChecking=yes
+          )
+
+          hosts="$T0_HOSTS"
+          if [ "${SIMULATE:-no}" = "bad-host" ]; then
+            hosts="$hosts vocms0500-there-is-no-such-host.cern.ch"
+            echo "simulate_failure=bad-host: added an unreachable host"
+          fi
+
+          {
+            echo "### Tier-0 SSH check"
+            echo ""
+            echo "| host | login | condor | /data | containers | unhealthy |"
+            echo "|---|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          failed=0
+          for h in $hosts; do
+            echo "::group::$h"
+            out=$(timeout 60 ssh "${SSHOPTS[@]}" "cmst0@$h" 'bash -s' < "$PROBE" 2>&1) \
+              && rc=0 || rc=$?
+            printf '%s\n' "$out"
+            echo "::endgroup::"
+
+            if [ "$rc" -ne 0 ]; then
+              echo "::error::ssh to $h failed (exit $rc)"
+              printf '| `%s` | FAIL (exit %s) | - | - | - | - |\n' "$h" "$rc" \
+                >> "$GITHUB_STEP_SUMMARY"
+              failed=1
+              continue
+            fi
+
+            field() { printf '%s\n' "$out" | sed -n "s/^$1=//p" | head -1; }
+            who=$(field who)
+
+            # The only conditions that count as red are: ssh did not connect,
+            # the host key did not match, or we did not end up as cmst0.
+            # Everything else is reported but does not fail the run -- a machine
+            # with no containers is a normal state, not a broken check.
+            if [ "$who" != "cmst0" ]; then
+              echo "::error::$h: logged in as '$who', expected cmst0"
+              failed=1
+            fi
+
+            printf '| `%s` | %s | %s | %s | %s (%s) | %s |\n' \
+              "$h" "${who:-unknown}" "$(field condor)" "$(field disk)" \
+              "$(field container_count)" "$(field containers)" \
+              "$(field unhealthy)" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          if [ "$failed" -ne 0 ]; then
+            echo ""
+            echo "One or more hosts could not be reached as cmst0."
+            exit 1
+          fi
+          echo "All hosts reachable as cmst0."
+
+      - name: Drop the Kerberos ticket
+        if: always()
+        run: |
+          kdestroy 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/krb5cc_ci"
+          # Should print "no credentials cache found" -- that is the good case.
+          klist 2>&1 | head -2 || true
