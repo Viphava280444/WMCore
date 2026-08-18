@@ -53,10 +53,16 @@ EOF
 
 # MariaDB data on RAM via /dev/shm: docker's own tmpfs mounts are root-owned
 # and the image's chown as the runner user fails on them, so bind a host RAM
-# directory owned by the runner user instead
-MDB_SHM_DIR="/dev/shm/wmci-mariadb-$(id -u)"
-rm -rf "$MDB_SHM_DIR"
-mkdir -p "$MDB_SHM_DIR"
+# directory owned by the runner user instead. With parallel stacks the dir is
+# per-stack via WMCI_MDB_DATA_DIR (each stack passes its own path, so the
+# rm -rf only ever touches the caller's own dir); the default is the
+# single-stack path that docker-compose.override.yml also falls back to.
+# Each stack likewise gets a private /tmp for its containers (the mariadb
+# server socket lives there).
+MDB_DATA_DIR="${WMCI_MDB_DATA_DIR:-/dev/shm/wmci-mariadb-$(id -u)}"
+rm -rf "$MDB_DATA_DIR"
+mkdir -p "$MDB_DATA_DIR"
+mkdir -p "$WORKSPACE"/tmp
 
 # containers resolve the runner uid through these generated files (the VM
 # account comes from sssd and is absent from the host /etc/passwd); this
