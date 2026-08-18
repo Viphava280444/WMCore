@@ -141,6 +141,10 @@ jobs:
       - name: Stop leftover containers
         run: |
           [ -n "$COMPOSE_FILE" ] && docker compose down --remove-orphans || true
+          # compose down only removes containers from this compose project; the
+          # compose file pins daemon-global container_names, so a foreign container
+          # holding "couchdb"/"mariadb" blocks every run (2026-08-04..18 outage)
+          docker rm -f couchdb mariadb 2>/dev/null || true
 
       # same startup sequence as the Jenkinsfile
       - name: Start containers
