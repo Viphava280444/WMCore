@@ -23,7 +23,7 @@ class Handler(socketserver.StreamRequestHandler):
             request_line = self.rfile.readline(8192).decode('latin-1').strip()
             if not request_line:
                 return
-            method, target, _version = request_line.split(' ', 2)
+            method, target = request_line.split(' ', 2)[:2]
             headers = []
             while True:
                 line = self.rfile.readline(8192)
@@ -34,7 +34,7 @@ class Handler(socketserver.StreamRequestHandler):
                 self.tunnel(target)
             else:
                 self.plain_http(method, target, headers)
-        except Exception as exc:  # noqa: BLE001 - proxy must never crash the job
+        except Exception as exc:  # pylint: disable=broad-exception-caught; the proxy must never crash the job
             print(f"proxy error: {exc}", flush=True)
 
     def tunnel(self, target):
