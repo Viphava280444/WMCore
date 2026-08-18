@@ -1,0 +1,12 @@
+# Dispatch stub. GitHub resolves workflow_dispatch names from the default
+# branch, so this file exists on master only to make the branch copy
+# dispatchable with: gh workflow run slice-fix-test.yml --ref slice-fix-test
+# The real jobs live in the slice-fix-test branch's copy of this file.
+name: Slice fix test
+on:
+  workflow_dispatch:
+jobs:
+  pointer:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Real version lives on branch slice-fix-test; dispatch with --ref slice-fix-test"
