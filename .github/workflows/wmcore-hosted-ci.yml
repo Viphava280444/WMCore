@@ -110,8 +110,6 @@ jobs:
           python-version: '3.12'
           cache: pip
           cache-dependency-path: .github/ci/hosted/requirements-hosted.txt
-      - name: pycurl build deps (no manylinux wheels)
-        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev
       - run: pip install -r .github/ci/hosted/requirements-hosted.txt
       - name: dummy secrets file (no CERN secret involved)
         run: |
@@ -133,6 +131,7 @@ jobs:
           python -m pytest -q -p no:cacheprovider -W ignore -o python_files='*_t.py' --junitxml=junit.xml \
             test/python/WMCore_t/WMBS_t test/python/WMCore_t/Database_t \
             --ignore=test/python/WMCore_t/WMBS_t/JobSplitting_t \
+            --ignore=test/python/WMCore_t/WMBS_t/CursorLeak_t.py \
             --ignore=test/python/WMCore_t/Database_t/CouchUtils_t.py \
             --ignore=test/python/WMCore_t/Database_t/CMSCouch_t.py \
             --ignore=test/python/WMCore_t/Database_t/RotatingDatabase_t.py \

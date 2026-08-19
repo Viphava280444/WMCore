@@ -11,5 +11,5 @@ PyMySQL~=1.2.0         # replaces mysqlclient
 psutil~=7.0.0
 requests~=2.32.4
 httplib2~=0.22.0
-pycurl~=7.45.6         # built from source; needs apt libcurl4-openssl-dev + libssl-dev
+pycurl~=7.45.6         # manylinux wheel exists for py3.12/x86_64; no apt build deps needed
 pytest~=9.1

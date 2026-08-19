@@ -30,6 +30,9 @@ Scope: `test/python/WMCore_t/WMBS_t` + `test/python/WMCore_t/Database_t`.
 Measured twice on fresh `mariadb:10.6` + `couchdb:3.3`: 162 passed, 2 skipped,
 0 failed. Exclusions, each with its reason:
 
+- `WMBS_t/CursorLeak_t.py` — imports `nose`, a py2-era package that cannot
+  install on py3.12 (also needs the removed `imp` module); a collection error
+  there aborts the whole pytest run.
 - `WMBS_t/JobSplitting_t` and `Database_t/CouchUtils_t.py` — import
   `WMQuality.TestInitCouchApp`, which imports `couchapp`; couchapp is not pip
   installable on py3.12 (its dependency restkit needs the removed `imp` module).
