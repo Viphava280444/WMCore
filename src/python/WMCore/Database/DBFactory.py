@@ -10,7 +10,7 @@ oracledb.version = "8.3.0"
 sys.modules["cx_Oracle"] = oracledb
 try:
     oracledb.init_oracle_client()
-except Exception:  # no Oracle Instant Client on this host (DPI-1047); thin mode is enough for non-Oracle backends
+except oracledb.DatabaseError:  # no Oracle Instant Client on this host (DPI-1047); thin mode is enough for non-Oracle backends
     pass
 
 

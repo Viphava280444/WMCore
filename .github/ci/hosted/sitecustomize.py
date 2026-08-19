@@ -1,3 +1,6 @@
+# pylint: disable=invalid-name
+# the module name MUST be lowercase "sitecustomize": python's site machinery
+# imports it by exactly that name at interpreter start
 """CI-only shim for the GitHub-hosted workflow (wmcore-hosted-ci.yml).
 
 Python's site machinery imports this module at interpreter start because the
