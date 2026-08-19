@@ -1,0 +1,145 @@
+# GitHub-hosted CI: zero CERN resources.
+#
+# Runs on ubuntu-latest with Docker Hub service containers (mariadb, couchdb)
+# and pip-only dependencies. ADDITIVE and advisory: wmcore-pr-test.yml on
+# vocms047 remains the authority for the Jenkins-contract statuses and the PR
+# comment. permissions is contents:read only, so this workflow structurally
+# cannot post statuses or comments. Scaffolding and the quarantine-list
+# rationale live in .github/ci/hosted/README.md.
+name: wmcore-hosted-ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: hosted-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  hosted-lint:
+    # context name must NOT collide with the vocms047 contexts
+    # (default / Py3 Unit tests / Py3 Pylint)
+    name: hosted-lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install 'pylint~=3.2.7' 'pycodestyle~=2.12.1'
+      - name: changed python files
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          BASE="$BASE_SHA"
+          [ -n "$BASE" ] || BASE=$(git rev-parse HEAD~1)
+          git diff --name-only --diff-filter=d "$BASE"...HEAD -- '*.py' > changedFiles.txt
+          cat changedFiles.txt
+      - name: pylint errors-only (BLOCKING)
+        run: |
+          [ -s changedFiles.txt ] || exit 0
+          # --disable=unrecognized-option is REQUIRED: standards/.pylintrc has
+          # legacy keys (files-output, include-id, ...) that pylint 3.2 reports
+          # as E0015, which would make -E fail on every PR
+          pylint -E --disable=unrecognized-option --rcfile=standards/.pylintrc $(cat changedFiles.txt)
+      - name: pylint full + pycodestyle (ADVISORY)
+        continue-on-error: true
+        run: |
+          [ -s changedFiles.txt ] || exit 0
+          pylint --rcfile=standards/.pylintrc --msg-template='{path}:{line}: [{msg_id}({symbol}), {obj}] {msg}' $(cat changedFiles.txt) | tee pylint.out || true
+          pycodestyle $(cat changedFiles.txt) > pep8py3.txt || true
+          { echo '### pycodestyle'; echo '```'; head -100 pep8py3.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosted-lint-reports
+          if-no-files-found: ignore
+          path: |
+            pylint.out
+            pep8py3.txt
+            changedFiles.txt
+
+  hosted-db-tests:
+    name: hosted-db-tests
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:10.6
+        env:
+          MYSQL_ROOT_PASSWORD: rootpw
+          MYSQL_USER: wmcore_unittest
+          MYSQL_PASSWORD: wmcore_unittest
+          MYSQL_DATABASE: wmcore_unittest
+        ports:
+          - '3306:3306'
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+      couchdb:
+        image: couchdb:3.3
+        env:
+          COUCHDB_USER: admin
+          COUCHDB_PASSWORD: couchpw
+        # host port MUST equal 5984: couch's replicator reconnects to the URL
+        # it is handed, so a remapped host port breaks replication tests
+        ports:
+          - '5984:5984'
+        options: >-
+          --health-cmd "curl -sf http://127.0.0.1:5984/_up"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+    env:
+      # client_flag=65536 = CLIENT.MULTI_STATEMENTS: WMInit.setSchemaFromModules
+      # feeds a whole wmcoredb .sql file as one statement
+      DATABASE: mysql://wmcore_unittest:wmcore_unittest@127.0.0.1:3306/wmcore_unittest?client_flag=65536
+      DIALECT: MySQL
+      COUCHURL: http://admin:couchpw@127.0.0.1:5984
+      WMAGENT_SECRETS_LOCATION: ${{ github.workspace }}/.ci-secrets/WMAgent.secrets
+      # .github/ci/hosted first: python's site machinery imports its
+      # sitecustomize.py (PyMySQL as MySQLdb) at interpreter start
+      PYTHONPATH: ${{ github.workspace }}/.github/ci/hosted:${{ github.workspace }}/src/python:${{ github.workspace }}/test/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: .github/ci/hosted/requirements-hosted.txt
+      - name: pycurl build deps (no manylinux wheels)
+        run: sudo apt-get update && sudo apt-get install -y libcurl4-openssl-dev libssl-dev
+      - run: pip install -r .github/ci/hosted/requirements-hosted.txt
+      - name: dummy secrets file (no CERN secret involved)
+        run: |
+          mkdir -p .ci-secrets
+          printf 'COUCH_USER=admin\nCOUCH_PASS=couchpw\nCOUCH_HOST=127.0.0.1\nCOUCH_PORT=5984\nMDB_USER=wmcore_unittest\nMDB_PASS=wmcore_unittest\n' > .ci-secrets/WMAgent.secrets
+      - name: couch system dbs
+        run: |
+          for db in _users _replicator _global_changes; do
+            curl -sf -X PUT "http://admin:couchpw@127.0.0.1:5984/$db" || true
+          done
+      - name: sanity (fails fast with a readable message)
+        run: python -c "import MySQLdb, sqlalchemy, wmcoredb; print('MySQLdb ->', MySQLdb.__name__, '| sqlalchemy', sqlalchemy.__version__)"
+      - name: unit tests
+        # scope + quarantine list: see .github/ci/hosted/README.md; measured
+        # twice on fresh services: 162 passed, 2 skipped, 0 failed.
+        # -o python_files='*_t.py' is required for pytest to collect
+        # directories at all (WMCore's naming is not pytest's default)
+        run: |
+          python -m pytest -q -p no:cacheprovider -W ignore -o python_files='*_t.py' --junitxml=junit.xml \
+            test/python/WMCore_t/WMBS_t test/python/WMCore_t/Database_t \
+            --ignore=test/python/WMCore_t/WMBS_t/JobSplitting_t \
+            --ignore=test/python/WMCore_t/Database_t/CouchUtils_t.py \
+            --ignore=test/python/WMCore_t/Database_t/CMSCouch_t.py \
+            --ignore=test/python/WMCore_t/Database_t/RotatingDatabase_t.py \
+            --deselect test/python/WMCore_t/WMBS_t/File_t.py::FileTest::testParentageByMergeJob
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hosted-db-tests-junit
+          if-no-files-found: ignore
+          path: junit.xml
