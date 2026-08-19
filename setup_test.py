@@ -312,7 +312,9 @@ if can_nose:
 
             threadCount = len(threading.enumerate())
 
-            # Set the signal handler and a 20-second alarm
+            # Set the signal handler and an exit alarm: 20 seconds by default,
+            # WMCORE_TEST_EXIT_ALARM overrides it (CI shortens the wait; the
+            # hang it bounds is a dead join on leaked non-daemon threads)
             def signal_handler(dummy1, dummy2):
                 sys.stderr.write("Timeout reached trying to shut down. Force killing...\n")
                 sys.stderr.flush()
@@ -322,7 +324,7 @@ if can_nose:
                     os.DMWM_REAL_EXIT(1)
 
             signal.signal(signal.SIGALRM, signal_handler)
-            signal.alarm(20)
+            signal.alarm(int(os.environ.get("WMCORE_TEST_EXIT_ALARM", "20")))
             marker = open("nose-marker.txt", "w")
             marker.write("Ready to be slayed\n")
             marker.flush()
