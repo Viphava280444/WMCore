@@ -469,11 +469,11 @@ jobs:
   # this job does the same on the runner VM. It compares this run's XMLs
   # (LatestUnitTests) against the newest successful baseline run
   # (MasterUnitTests, Jenkins: copyArtifacts lastSuccessful), then posts the
-  # "Jenkins results:" comment and the Py3 Unit tests / Py3 Pylint statuses.
+  # "GitHub Actions results:" comment and the Py3 Unit tests / Py3 Pylint statuses.
   # Like Jenkins (propagate: false), it runs even when unit tests failed.
   report:
     # NOT gated on the unit-tests result: like Jenkins (propagate: false),
-    # the report must post the "Jenkins results:" comment and the statuses
+    # the report must post the "GitHub Actions results:" comment and the statuses
     # even when the test job failed
     needs: [begin, unit-tests]
     if: ${{ !cancelled() && needs.begin.result == 'success' }}
@@ -537,18 +537,28 @@ jobs:
           run-id: ${{ steps.baseline.outputs.run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # twin of "Generate Reports": unchanged script, jinja templates from the
-      # VM-local WMCore-Jenkins clone (Jenkins checks the same repo out into
-      # its workspace). Posts the comment + the two named commit statuses.
-      - name: Generate report and update PR (unchanged PullRequestReport.py)
+      # twin of "Generate Reports": jinja templates from the VM-local
+      # WMCore-Jenkins clone (Jenkins checks the same repo out into its
+      # workspace). Posts the comment + the two named commit statuses.
+      # The script logic is unchanged; only the comment's opening words are
+      # patched at runtime, because the runs come from GitHub Actions now,
+      # not Jenkins.
+      - name: Generate report and update PR (PullRequestReport.py)
         env:
           DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WMCORE_REPO: ${{ github.repository_owner }}
           CODE_REPO: WMCore
           JENKINS_JINJA_TEMPLATE_PATH: ${{ env.WMCORE_JENKINS_HOST_DIR }}/templates
         run: |
-          report-venv/bin/python \
-            "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestReport.py"
+          # Fork-only wording change: the upstream script is dmwm-owned and the
+          # VM clone is mounted read-only, so patch a throwaway copy instead of
+          # vendoring all of its pylint/xunit/jinja logic.
+          cp "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestReport.py" \
+             "$RUNNER_TEMP/PullRequestReport.py"
+          grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
+            || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
+          sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
+          report-venv/bin/python "$RUNNER_TEMP/PullRequestReport.py"
 
       - name: Upload PR report
         if: always()
@@ -562,7 +572,7 @@ jobs:
       # "default" status (set to pending by the begin job) to the build
       # outcome when WMCore-PR-Report finishes. Posting without "context"
       # makes GitHub use the name "default", same as the begin script.
-      - name: Finish default status (ghprb twin)
+      - name: Finish default status (report job outcome)
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -608,7 +618,7 @@ jobs:
                    f'| {tests} | {failures} | {errors} | {skipped} |', '']
           if os.path.exists('LatestPylint/pep8py3.txt'):
               n = sum(1 for _ in open('LatestPylint/pep8py3.txt'))
-              lines.append(f'pycodestyle: {n} comments to review (informational, like Jenkins)')
+              lines.append(f'pycodestyle: {n} comments to review (informational, non-blocking)')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('\n'.join(lines) + '\n')
           EOF
