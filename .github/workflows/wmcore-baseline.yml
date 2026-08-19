@@ -42,8 +42,11 @@ on:
 permissions:
   contents: write   # push and prune the JENKINS_<timestamp> tags
 
+# shared with the unit-tests job of wmcore-pr-test.yml: a PR run now occupies
+# the whole VM with three parallel test stacks, so baseline and PR test runs
+# must queue behind each other instead of fighting for cores and RAM disk
 concurrency:
-  group: wmcore-baseline
+  group: vocms047-tests
   cancel-in-progress: false
 
 env:
@@ -112,7 +115,10 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        # 12 and 13 exist beyond SLICES=12: the per-method hash scatters ~21
+        # real tests there (Api_t, Simple_t). The PR run tests 0..13, so the
+        # baseline must cover the same axis or those tests diff as "new".
+        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     env:
       SLICE: ${{ matrix.slice }}
     steps:
@@ -128,11 +134,24 @@ jobs:
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
           echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          # the override runs the stack on its own bridge network now (so that
+          # PR tests can run several stacks side by side); on that network the
+          # containers have no NAT, so egress goes through the host proxy below
+          echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"
+          echo "WMCI_PROXY=http://127.0.0.1:3128" >> "$GITHUB_ENV"
           docker version
           docker compose version
 
       - name: Prepare workspace (fork twin of setup-env.sh)
         run: bash wmcore-src/.github/ci/setup-env-gha.sh
+
+      - name: Start host egress proxy
+        run: |
+          SOCK="$HOST_MOUNT_DIR/tmp/wmci-egress.sock"
+          setsid nohup python3 wmcore-src/.github/ci/ci-proxy.py "$SOCK" > proxy.log 2>&1 &
+          echo $! > proxy.pid
+          sleep 2
+          test -S "$SOCK" || { echo "proxy socket missing"; cat proxy.log; exit 1; }
 
       - name: Stop leftover containers
         run: |
@@ -194,6 +213,7 @@ jobs:
           docker compose exec -T -u "$MY_ID" \
             -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
             -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh
 
       - name: Upload test results
@@ -208,6 +228,7 @@ jobs:
         if: always()
         run: |
           [ -n "$COMPOSE_FILE" ] && docker compose down || true
+          [ -f proxy.pid ] && kill "$(cat proxy.pid)" 2>/dev/null || true
 
   summary:
     needs: unit-tests

@@ -15,10 +15,21 @@
 #     private, so CI cannot fetch it); the test, lint, and report scripts run
 #     UNCHANGED (tests/lint inside the wmcore-dev image; report scripts from
 #     the VM-local WMCore-Jenkins clone, like Jenkins runs them on the agent)
-#   - same test command, same 12 slices, same 5 retries per slice
+#   - same test command, same slice split, same 5 retries per slice
 #
 # Differences, on purpose (fork testing phase):
-#   - runs on the fork's self-hosted runner; slices run one after another
+#   - runs on the fork's self-hosted runner; instead of one slice per job run
+#     serially, ONE job runs three isolated test stacks in parallel on the VM
+#     (32 cores sat idle while a single stack worked). Each stack is a full
+#     mariadb+couchdb+test container set in its own network namespace, own
+#     workspace, own RAM data dir and own /tmp (see .github/ci/*), and
+#     executes a runtime-balanced share of the 14 slice invocations. Measured
+#     on branch parallel-stacks-test (run 32176636449): 1653 tests, 1043 s
+#     wall for the stacks step vs ~55 min serial.
+#   - the stacks reach the internet through a per-stack host proxy
+#     (.github/ci/ci-proxy.py + ci-shim.py): the VM's docker programs no NAT
+#     and its nftables drops container<->host IP traffic, so egress goes
+#     through a bind-mounted unix socket instead
 #   - dummy secrets and a self-signed cert (.github/ci/setup-env-gha.sh);
 #     the fork stores no secrets at all
 #   - DMWMBOT_TOKEN for the report scripts is the workflow's own GITHUB_TOKEN
@@ -47,11 +58,16 @@ on:
       pr_number:
         description: 'PR number to test'
         required: true
-      slices:
-        description: 'JSON list of slices to run'
-        required: false
-        default: '[0,1,2,3,4,5,6,7,8,9,10,11]'
 
+# Two levels, on purpose:
+#  - here, per PR: a new push to the same PR cancels the running tests, as
+#    before (the slice matrix is gone, but the semantics are unchanged).
+#  - on the unit-tests job: group "vocms047-tests", shared with the baseline
+#    workflow. The three stacks use the whole VM, so a PR test run and a
+#    baseline run must not overlap; queued, never cancelled, so no run is
+#    thrown away. Keeping that group off the workflow level is deliberate:
+#    at workflow level it would serialize (and, with cancel-in-progress,
+#    cancel) unrelated PRs against each other.
 concurrency:
   group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
@@ -108,17 +124,26 @@ jobs:
           "$RUNNER_TEMP/report-venv/bin/python" \
             "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestTestBegin.py"
 
+  # fork twin of the WMCore-PR-test 12-cell matrix, run as THREE isolated
+  # stacks in parallel inside one job (see the header). The slice groups are
+  # the measured-optimal 3-way split of the 14 slice invocations
+  # (810/809/809 s), copied from the parallel-stacks-test experiment.
   unit-tests:
     needs: begin
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        slice: ${{ fromJSON(inputs.slices || '[0,1,2,3,4,5,6,7,8,9,10,11]') }}
+    # ~17 min when everything passes; the head-room is for the retry(5) loops
+    timeout-minutes: 90
+    # the three stacks use the whole VM: never at the same time as a baseline
+    # run (same group there), and never cancelled halfway
+    concurrency:
+      group: vocms047-tests
+      cancel-in-progress: false
     env:
-      SLICE: ${{ matrix.slice }}
+      STACK1_SLICES: '3 7 11 13'
+      STACK2_SLICES: '4 5 8 12'
+      STACK3_SLICES: '0 1 2 6 9 10'
+      # every slice id that must produce an XML for the run to count
+      ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
@@ -130,96 +155,216 @@ jobs:
           echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
-          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
           echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"
           docker version
           docker compose version
 
-      - name: Prepare workspace (fork twin of setup-env.sh)
-        run: bash wmcore-src/.github/ci/setup-env-gha.sh
-
       - name: Stop leftover containers
         run: |
-          [ -n "$COMPOSE_FILE" ] && docker compose down --remove-orphans || true
-          # compose down only removes containers from this compose project; the
-          # compose file pins daemon-global container_names, so a foreign container
-          # holding "couchdb"/"mariadb" blocks every run (2026-08-04..18 outage)
+          # the vendored compose file pins daemon-global container_names, so a
+          # foreign container holding "couchdb"/"mariadb" blocks every run
+          # (2026-08-04..18 outage); the override renames them per stack, but
+          # containers left by an older revision of this workflow can still
+          # squat the bare names
           docker rm -f couchdb mariadb 2>/dev/null || true
+          # stale stacks from a killed/cancelled run of this job
+          for k in 1 2 3; do
+            docker rm -f "wmci${k}-mariadb" "wmci${k}-couchdb" 2>/dev/null || true
+            ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
+            [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
+            docker network rm "wmci${k}_stacknet" 2>/dev/null || true
+          done
+          docker network rm wmciwarm_stacknet 2>/dev/null || true
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 unit-test-xml
+          docker ps
 
-      # same startup sequence as the Jenkinsfile
-      - name: Start containers
+      # one pull before the fan-out: three stacks pulling the same images
+      # concurrently race each other in the local image store
+      - name: Warm images once
         run: |
+          export COMPOSE_PROJECT_NAME=wmciwarm
+          export HOST_MOUNT_DIR="$GITHUB_WORKSPACE/ci-stack-1"
+          export WMCI_MDB_DATA_DIR="/dev/shm/wmci-mdb-$(id -u)-warm"
+          mkdir -p "$HOST_MOUNT_DIR" "$WMCI_MDB_DATA_DIR"
+          docker compose pull --quiet mariadb couchdb "$TEST_SERVICE" || true
+          rm -rf "$WMCI_MDB_DATA_DIR"
+
+      # Each stack: own compose project, own workspace, own RAM data dir, own
+      # /24 bridge subnet, own host egress proxy. Inside a stack the slices
+      # still run one after another, with the Jenkinsfile's retry(5).
+      # This step never decides the job outcome - the integrity check below
+      # does - so a teardown hiccup cannot turn a complete run red.
+      - name: Run 3 stacks in parallel (balanced slice groups)
+        run: |
+          cat > stack-runner.sh <<'RUNNER'
+          #!/bin/bash
+          K="$1"; shift
+          SLICE_LIST="$*"
+          export COMPOSE_PROJECT_NAME="wmci$K"
+          export HOST_MOUNT_DIR="$GITHUB_WORKSPACE/ci-stack-$K"
+          export WMCI_MDB_DATA_DIR="/dev/shm/wmci-mdb-$(id -u)-$K"
+          export WMCI_NET="9$K"
+          export WMCI_PROXY="http://127.0.0.1:3128"
+          rc=0
+          # stagger the starts: three simultaneous container creations on this
+          # VM's docker daemon occasionally trip over each other
+          sleep $(( (K-1) * 20 ))
+          bash wmcore-src/.github/ci/setup-env-gha.sh
+          setsid nohup python3 "$WMCI_CI_DIR/ci-proxy.py" "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" > "$HOST_MOUNT_DIR/proxy.log" 2>&1 &
+          echo $! > "$HOST_MOUNT_DIR/proxy.pid"
+          sleep 2
+          test -S "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" || { echo "[S$K] proxy socket missing"; exit 1; }
+          docker compose down --remove-orphans || true
           docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
           sleep 20
-          docker ps
-          echo "--Check MariaDB docker logs"
-          docker compose logs mariadb
-          echo "--Check CouchDB docker logs"
-          docker compose logs couchdb
-          echo "--Check CouchDB certificates"
-          docker compose exec -T couchdb ls -l /data/certs
-          docker compose exec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
-          echo "--Check wmcore-unittest logs"
-          docker compose logs "$TEST_SERVICE"
-
-      # the image entrypoint clones WMCore + copies the CI scripts at container
-      # start; wait until that setup is really done (replaces guessing with a
-      # readiness check - Jenkins' sleep 20 served the same purpose)
-      - name: Wait for container CI setup
-        run: |
           ready=""
           for i in $(seq 1 60); do
             if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
             sleep 5
           done
-          if [ -z "$ready" ]; then
-            echo "Entrypoint setup did not finish in time; container logs:"
-            docker compose logs "$TEST_SERVICE"
-            exit 1
-          fi
-          docker compose logs "$TEST_SERVICE"
-
-      # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
-      # git resolve that URL to this fork (PR refs live here). Also give git an
-      # identity and safe.directory for the uid-mapped exec user.
-      # DELETE this step when the workflow moves upstream.
-      - name: Point dmwm/WMCore at this fork
-        run: |
+          [ -n "$ready" ] || { echo "[S$K] entrypoint setup failed"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
+          # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so
+          # make git resolve that URL to this fork (PR refs live here).
+          # DELETE this when the workflow moves upstream.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
-            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"
-            cat "$GIT_CONFIG_GLOBAL"'
-
-      # same as the Jenkinsfile: retry(5) around the unchanged test script
-      - name: Run test slice
-        run: |
-          ok=0
-          for attempt in 1 2 3 4 5; do
-            echo "Attempt $attempt: testing slice $SLICE of $SLICES for build $BUILD_ID"
-            if docker compose exec -T -u "$MY_ID" \
-                 -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
-                 -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
-                 "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
-              ok=1; break
-            fi
-            sleep 5
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
+          stack_start=$(date +%s)
+          for S in $SLICE_LIST; do
+            s0=$(date +%s)
+            ok=0
+            # same as the Jenkinsfile: retry(5) around the unchanged script
+            for attempt in 1 2 3 4 5; do
+              echo "[S$K] attempt $attempt: testing slice $S of $SLICES for build $BUILD_ID (PR ${ghprbPullId:-none})"
+              if docker compose exec -T -u "$MY_ID" \
+                   -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
+                   -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+                   -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
+                   "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
+                ok=1; break
+              fi
+              sleep 5
+            done
+            [ "$ok" = 1 ] || { echo "[S$K] slice $S still failing after 5 attempts"; rc=1; }
+            echo "STACK$K slice=$S ok=$ok wall_seconds=$(( $(date +%s) - s0 ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
           done
-          test "$ok" = 1
+          echo "STACK$K total_wall_seconds=$(( $(date +%s) - stack_start ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
+          docker compose down || true
+          kill "$(cat "$HOST_MOUNT_DIR/proxy.pid")" 2>/dev/null || true
+          exit $rc
+          RUNNER
+          chmod +x stack-runner.sh
+          overall=$(date +%s)
+          ./stack-runner.sh 1 $STACK1_SLICES > stack1.log 2>&1 & P1=$!
+          ./stack-runner.sh 2 $STACK2_SLICES > stack2.log 2>&1 & P2=$!
+          ./stack-runner.sh 3 $STACK3_SLICES > stack3.log 2>&1 & P3=$!
+          wait $P1 || echo "stack1 reported a failing slice or setup error"
+          wait $P2 || echo "stack2 reported a failing slice or setup error"
+          wait $P3 || echo "stack3 reported a failing slice or setup error"
+          echo "PARALLEL total_wall_seconds=$(( $(date +%s) - overall ))"
+          echo "--- stack logs (tails) ---"
+          tail -n 25 stack1.log stack2.log stack3.log || true
+          # deliberately green: the XML integrity check is the gate
+          exit 0
+
+      - name: Collect slice results
+        if: always()
+        run: |
+          rm -rf unit-test-xml
+          mkdir -p unit-test-xml
+          # one flat directory, so the download in the report job produces
+          # LatestUnitTests/<artifact>/nosetestspy3-*.xml - the exact shape
+          # PullRequestReport.py globs ('*/nosetestspy3-*.xml')
+          cp ci-stack-*/artifacts/nosetestspy3-*.xml unit-test-xml/ 2>/dev/null || true
+          cat ci-stack-*/artifacts/stack-timing.txt > stack-timing.txt 2>/dev/null || true
+          ls -l unit-test-xml
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nosetests-slice-${{ matrix.slice }}
-          path: ci-workspace/artifacts/nosetests*.xml
+          # the name must keep matching the report job's nosetests-slice-*
+          # download pattern; one artifact now holds all slices
+          name: nosetests-slice-all
+          path: unit-test-xml/nosetestspy3-*.xml
           if-no-files-found: warn
 
-      - name: Stop containers
+      - name: Upload stack logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-logs
+          path: |
+            stack-timing.txt
+            stack1.log
+            stack2.log
+            stack3.log
+          if-no-files-found: warn
+
+      # the job's verdict: every slice produced a parseable XML and the run
+      # counted a sane number of tests. Individual test failures are NOT a
+      # job failure - the report job compares them against the baseline and
+      # sets the commit statuses, exactly as Jenkins does.
+      - name: Check result integrity
         if: always()
         run: |
-          [ -n "$COMPOSE_FILE" ] && docker compose down || true
+          python3 - <<'EOF'
+          import glob, os, re, sys
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+          expected = os.environ['ALL_SLICES'].split()
+          total = fails = errs = 0
+          seen, rows, bad = set(), [], []
+          for f in sorted(glob.glob('unit-test-xml/nosetestspy3-*.xml')):
+              m = re.search(r'nosetestspy3-(\d+)-', os.path.basename(f))
+              try:
+                  root = ET.parse(f).getroot()
+              except ET.ParseError:
+                  bad.append(f)
+                  continue
+              if m:
+                  seen.add(m.group(1))
+              suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')
+              for s in suites:
+                  total += int(s.get('tests', 0))
+                  fails += int(s.get('failures', 0))
+                  errs += int(s.get('errors', 0))
+                  rows.append(f"- `{os.path.basename(f)}`: {s.get('tests')} tests, "
+                              f"{s.get('failures')} failures, {s.get('errors')} errors")
+          missing = [s for s in expected if s not in seen]
+          timing = open('stack-timing.txt').read() if os.path.exists('stack-timing.txt') else ''
+          lines = ['## WMCore PR unit tests (3 parallel stacks)', '',
+                   f'**{total} tests** in {len(seen)}/{len(expected)} slices, '
+                   f'{fails} failures, {errs} errors', ''] + rows + ['', '```', timing, '```']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(lines) + '\n')
+          if bad:
+              print('unparseable result files: %s' % ', '.join(bad))
+          if missing:
+              print('MISSING result XML for slices: %s' % ' '.join(missing))
+          # 1653 tests on the proven run; anything far below means slices
+          # died before writing results, however green the containers looked
+          if total < 1000:
+              print('IMPLAUSIBLE total test count: %d' % total)
+          sys.exit(1 if (bad or missing or total < 1000) else 0)
+          EOF
+
+      - name: Stop stacks
+        if: always()
+        run: |
+          for k in 1 2 3; do
+            [ -f "ci-stack-$k/proxy.pid" ] && kill "$(cat "ci-stack-$k/proxy.pid")" 2>/dev/null || true
+            ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
+            [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
+            docker network rm "wmci${k}_stacknet" 2>/dev/null || true
+            rm -rf "/dev/shm/wmci-mdb-$(id -u)-$k"
+          done
+          docker ps
 
   pylint:
     needs: begin
