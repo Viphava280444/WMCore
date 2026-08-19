@@ -16,6 +16,19 @@ import urllib.error
 import urllib.request
 
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A proxy must relay 3xx to the client, not follow it: following an
+    http->https redirect here would strip the client's own credentials
+    (grid certificate) from the https hop. The client follows the Location
+    itself and reaches https through the CONNECT tunnel with its cert."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
+
+
 class Handler(socketserver.StreamRequestHandler):
     timeout = 120
 
@@ -67,17 +80,24 @@ class Handler(socketserver.StreamRequestHandler):
             except ValueError:
                 continue
         try:
-            resp = urllib.request.urlopen(req, timeout=60)
+            resp = OPENER.open(req, timeout=60)
         except urllib.error.HTTPError as httperr:
-            # a 4xx/5xx is a valid HTTP response the client must see: tests
-            # like Requests_t:test404Error assert on the status code, and
-            # swallowing it here turned into (52, 'Empty reply from server')
+            # a 3xx/4xx/5xx is a valid HTTP response the client must see:
+            # tests like Requests_t:test404Error assert on the status code,
+            # and swallowing it here turned into (52, 'Empty reply from
+            # server'); 3xx additionally needs its Location header relayed
             resp = httperr
         with resp:
             body = resp.read()
             status = getattr(resp, 'status', None) or resp.code
             reason = getattr(resp, 'reason', '') or 'OK'
             self.wfile.write(f'HTTP/1.1 {status} {reason}\r\n'.encode('latin-1'))
+            for name, value in resp.headers.items():
+                if name.lower() in ('connection', 'keep-alive', 'proxy-connection',
+                                    'proxy-authenticate', 'transfer-encoding',
+                                    'content-length', 'upgrade'):
+                    continue
+                self.wfile.write(f'{name}: {value}\r\n'.encode('latin-1'))
             self.wfile.write(f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n'.encode('latin-1'))
             self.wfile.write(body)
 
