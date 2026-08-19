@@ -2,7 +2,7 @@
 #
 # Runs on ubuntu-latest with Docker Hub service containers (mariadb, couchdb)
 # and pip-only dependencies. ADDITIVE and advisory: wmcore-pr-test.yml on
-# vocms047 remains the authority for the Jenkins-contract statuses and the PR
+# vocms047 remains the authority for the contract commit statuses and the PR
 # comment. permissions is contents:read only, so this workflow structurally
 # cannot post statuses or comments. Scaffolding and the quarantine-list
 # rationale live in .github/ci/hosted/README.md.

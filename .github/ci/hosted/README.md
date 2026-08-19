@@ -3,7 +3,8 @@
 Files in this directory serve only `.github/workflows/wmcore-hosted-ci.yml`,
 which runs on GitHub-hosted `ubuntu-latest` runners. The workflow is ADDITIVE
 and advisory: `wmcore-pr-test.yml` on vocms047 remains the authority for the
-Jenkins-contract statuses and the PR comment. This workflow has
+contract commit statuses (`default`, `Py3 Unit tests`, `Py3 Pylint`) and the
+PR comment. This workflow has
 `permissions: contents: read` only, so it structurally cannot post them.
 
 ## Why each piece exists
