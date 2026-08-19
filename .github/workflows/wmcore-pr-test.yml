@@ -251,6 +251,17 @@ jobs:
             sleep 2
           done
           [ -n "$ready" ] || { echo "[S$K] entrypoint setup failed"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
+          # the entrypoint copies TestScripts first and chowns the home tree
+          # afterwards; a slice started in that window dies on 'rucio.cfg:
+          # Permission denied' (run 32271364956: the first slice of all 4
+          # stacks lost an attempt to it). Wait for the chown as the test
+          # uid, but only warn on timeout - retry(5) absorbs a miss.
+          chowned=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T -u "$MY_ID" "$TEST_SERVICE" test -w /home/cmsbld/etc; then chowned=1; break; fi
+            sleep 2
+          done
+          [ -n "$chowned" ] || echo "[S$K] warning: /home/cmsbld/etc still not writable after 120s, continuing"
           # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so
           # make git resolve that URL to this fork (PR refs live here).
           # DELETE this when the workflow moves upstream.
