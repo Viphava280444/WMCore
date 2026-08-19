@@ -12,6 +12,7 @@ import socket
 import socketserver
 import sys
 import threading
+import urllib.error
 import urllib.request
 
 
@@ -65,9 +66,18 @@ class Handler(socketserver.StreamRequestHandler):
                     req.add_header(name.strip(), value.strip())
             except ValueError:
                 continue
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        try:
+            resp = urllib.request.urlopen(req, timeout=60)
+        except urllib.error.HTTPError as httperr:
+            # a 4xx/5xx is a valid HTTP response the client must see: tests
+            # like Requests_t:test404Error assert on the status code, and
+            # swallowing it here turned into (52, 'Empty reply from server')
+            resp = httperr
+        with resp:
             body = resp.read()
-            self.wfile.write(f'HTTP/1.1 {resp.status} OK\r\n'.encode('latin-1'))
+            status = getattr(resp, 'status', None) or resp.code
+            reason = getattr(resp, 'reason', '') or 'OK'
+            self.wfile.write(f'HTTP/1.1 {status} {reason}\r\n'.encode('latin-1'))
             self.wfile.write(f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n'.encode('latin-1'))
             self.wfile.write(body)
 
