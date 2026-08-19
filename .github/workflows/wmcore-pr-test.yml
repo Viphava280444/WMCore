@@ -19,13 +19,17 @@
 #
 # Differences, on purpose (fork testing phase):
 #   - runs on the fork's self-hosted runner; instead of one slice per job run
-#     serially, ONE job runs four isolated test stacks in parallel on the VM
+#     serially, ONE job runs three isolated test stacks in parallel on the VM
 #     (32 cores sat idle while a single stack worked). Each stack is a full
 #     mariadb+couchdb+test container set in its own network namespace, own
 #     workspace, own RAM data dir and own /tmp (see .github/ci/*), and
 #     executes a runtime-balanced share of the 14 slice invocations.
 #     Measured at 3 stacks (run 32193701287): 1653 tests, 905 s stacks step,
-#     19m17s wall vs ~55 min serial.
+#     19m17s wall vs ~55 min serial. A 4th stack was measured (runs
+#     32271364956, 32273362962) to save ~60 s but make tests that start a
+#     fixed-port local server (127.0.0.1:8888/9988) fail under the extra
+#     load, in both runs - do not add it back before those tests get a
+#     wait-for-listen loop.
 #   - the lint container runs beside the stacks in the same job, and the run
 #     summary is a step of the report job: the runner executes one job at a
 #     time, and a job that is queued while the runner is busy pays ~52 s of
@@ -130,27 +134,26 @@ jobs:
           "$RUNNER_TEMP/report-venv/bin/python" \
             "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestTestBegin.py"
 
-  # fork twin of the WMCore-PR-test 12-cell matrix, run as FOUR isolated
+  # fork twin of the WMCore-PR-test 12-cell matrix, run as THREE isolated
   # stacks in parallel inside one job (see the header). The slice groups are
-  # the optimal 4-way split of the per-slice times measured in run
+  # the optimal 3-way split of the per-slice times measured in run
   # 32193701287, shifted for the WMCORE_TEST_EXIT_ALARM=10 exit fix. The
   # start stagger delays stack K by (K-1)*20 s, so the largest group is
-  # stack 1 and the smallest is stack 4.
+  # stack 1 and the smallest is stack 3.
   unit-tests:
     needs: begin
     runs-on: [self-hosted, Linux, X64]
-    # ~11 min when everything passes; the head-room is for the retry(5) loops
+    # ~13 min when everything passes; the head-room is for the retry(5) loops
     timeout-minutes: 90
-    # the four stacks use the whole VM: never at the same time as a baseline
+    # the three stacks use the whole VM: never at the same time as a baseline
     # run (same group there), and never cancelled halfway
     concurrency:
       group: vocms047-tests
       cancel-in-progress: false
     env:
-      STACK1_SLICES: '0 5 6 9 12 13'
-      STACK2_SLICES: '4 10 11'
-      STACK3_SLICES: '1 3 7'
-      STACK4_SLICES: '2 8'
+      STACK1_SLICES: '1 2 5 10 12'
+      STACK2_SLICES: '0 6 7 8 13'
+      STACK3_SLICES: '3 4 9 11'
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
@@ -209,10 +212,10 @@ jobs:
       # /24 bridge subnet, own host egress proxy. Inside a stack the slices
       # still run one after another, with the Jenkinsfile's retry(5).
       # The lint container (host-networked, no databases, no egress proxy
-      # needed) runs beside the stacks as a fifth background process.
+      # needed) runs beside the stacks as a fourth background process.
       # This step never decides the job outcome - the integrity check below
       # does - so a teardown or lint hiccup cannot turn a complete run red.
-      - name: Run 4 stacks and pylint in parallel
+      - name: Run 3 stacks and pylint in parallel
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -338,16 +341,14 @@ jobs:
           ./stack-runner.sh 1 $STACK1_SLICES > stack1.log 2>&1 & P1=$!
           ./stack-runner.sh 2 $STACK2_SLICES > stack2.log 2>&1 & P2=$!
           ./stack-runner.sh 3 $STACK3_SLICES > stack3.log 2>&1 & P3=$!
-          ./stack-runner.sh 4 $STACK4_SLICES > stack4.log 2>&1 & P4=$!
           ./pylint-runner.sh > pylint.log 2>&1 & PL=$!
           wait $P1 || echo "stack1 reported a failing slice or setup error"
           wait $P2 || echo "stack2 reported a failing slice or setup error"
           wait $P3 || echo "stack3 reported a failing slice or setup error"
-          wait $P4 || echo "stack4 reported a failing slice or setup error"
           wait $PL || echo "pylint exited nonzero (see pylint.log; the report job posts the authoritative Py3 Pylint status)"
           echo "PARALLEL total_wall_seconds=$(( $(date +%s) - overall ))"
           echo "--- stack logs (tails) ---"
-          tail -n 25 stack1.log stack2.log stack3.log stack4.log pylint.log || true
+          tail -n 25 stack1.log stack2.log stack3.log pylint.log || true
           # deliberately green: the XML integrity check is the gate
           exit 0
 
@@ -383,7 +384,6 @@ jobs:
             stack1.log
             stack2.log
             stack3.log
-            stack4.log
             pylint.log
           if-no-files-found: warn
 
@@ -433,7 +433,7 @@ jobs:
                               f"{s.get('failures')} failures, {s.get('errors')} errors")
           missing = [s for s in expected if s not in seen]
           timing = open('stack-timing.txt').read() if os.path.exists('stack-timing.txt') else ''
-          lines = ['## WMCore PR unit tests (4 parallel stacks)', '',
+          lines = ['## WMCore PR unit tests (3 parallel stacks)', '',
                    f'**{total} tests** in {len(seen)}/{len(expected)} slices, '
                    f'{fails} failures, {errs} errors', ''] + rows + ['', '```', timing, '```']
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
