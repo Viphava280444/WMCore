@@ -213,6 +213,7 @@ jobs:
           docker compose exec -T -u "$MY_ID" \
             -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
             -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            -e WMCORE_TEST_EXIT_ALARM=10 \
             -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh
 

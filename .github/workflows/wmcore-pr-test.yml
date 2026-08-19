@@ -5,7 +5,7 @@
 # possible. Jenkins stage -> job mapping:
 #   - "Update GitHub PR status" (PullRequestTestBegin.py)  -> job "begin"
 #   - WMCore-PR-test 12-slice matrix                       -> job "unit-tests"
-#   - WMCore-PR-pylint                                     -> job "pylint"
+#   - WMCore-PR-pylint                    -> lint container inside "unit-tests"
 #   - "Copy artifacts" + "Generate Reports"
 #     (PullRequestReport.py)                               -> job "report"
 #   - ghprb plugin's final build status ("default")        -> last step of "report"
@@ -19,13 +19,19 @@
 #
 # Differences, on purpose (fork testing phase):
 #   - runs on the fork's self-hosted runner; instead of one slice per job run
-#     serially, ONE job runs three isolated test stacks in parallel on the VM
+#     serially, ONE job runs four isolated test stacks in parallel on the VM
 #     (32 cores sat idle while a single stack worked). Each stack is a full
 #     mariadb+couchdb+test container set in its own network namespace, own
 #     workspace, own RAM data dir and own /tmp (see .github/ci/*), and
-#     executes a runtime-balanced share of the 14 slice invocations. Measured
-#     on branch parallel-stacks-test (run 32176636449): 1653 tests, 1043 s
-#     wall for the stacks step vs ~55 min serial.
+#     executes a runtime-balanced share of the 14 slice invocations.
+#     Measured at 3 stacks (run 32193701287): 1653 tests, 905 s stacks step,
+#     19m17s wall vs ~55 min serial.
+#   - the lint container runs beside the stacks in the same job, and the run
+#     summary is a step of the report job: the runner executes one job at a
+#     time, and a job that is queued while the runner is busy pays ~52 s of
+#     pickup latency (measured on 26 job boundaries), so fewer jobs = less
+#     dead time. The authoritative Py3 Pylint verdict still comes from
+#     PullRequestReport.py in the report job.
 #   - the stacks reach the internet through a per-stack host proxy
 #     (.github/ci/ci-proxy.py + ci-shim.py): the VM's docker programs no NAT
 #     and its nftables drops container<->host IP traffic, so egress goes
@@ -124,24 +130,27 @@ jobs:
           "$RUNNER_TEMP/report-venv/bin/python" \
             "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestTestBegin.py"
 
-  # fork twin of the WMCore-PR-test 12-cell matrix, run as THREE isolated
+  # fork twin of the WMCore-PR-test 12-cell matrix, run as FOUR isolated
   # stacks in parallel inside one job (see the header). The slice groups are
-  # the measured-optimal 3-way split of the 14 slice invocations
-  # (810/809/809 s), copied from the parallel-stacks-test experiment.
+  # the optimal 4-way split of the per-slice times measured in run
+  # 32193701287, shifted for the WMCORE_TEST_EXIT_ALARM=10 exit fix. The
+  # start stagger delays stack K by (K-1)*20 s, so the largest group is
+  # stack 1 and the smallest is stack 4.
   unit-tests:
     needs: begin
     runs-on: [self-hosted, Linux, X64]
-    # ~17 min when everything passes; the head-room is for the retry(5) loops
+    # ~11 min when everything passes; the head-room is for the retry(5) loops
     timeout-minutes: 90
-    # the three stacks use the whole VM: never at the same time as a baseline
+    # the four stacks use the whole VM: never at the same time as a baseline
     # run (same group there), and never cancelled halfway
     concurrency:
       group: vocms047-tests
       cancel-in-progress: false
     env:
-      STACK1_SLICES: '3 7 11 13'
-      STACK2_SLICES: '4 5 8 12'
-      STACK3_SLICES: '0 1 2 6 9 10'
+      STACK1_SLICES: '0 5 6 9 12 13'
+      STACK2_SLICES: '4 10 11'
+      STACK3_SLICES: '1 3 7'
+      STACK4_SLICES: '2 8'
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
@@ -168,18 +177,24 @@ jobs:
           # containers left by an older revision of this workflow can still
           # squat the bare names
           docker rm -f couchdb mariadb 2>/dev/null || true
-          # stale stacks from a killed/cancelled run of this job
-          for k in 1 2 3; do
+          # stale stacks from a killed/cancelled run of this job. A stale
+          # ci-stack-K directory is worse than a stale container: its old
+          # XMLs would be collected as THIS run's results, so the rm -rf
+          # below must always cover every stack index ever used.
+          for k in 1 2 3 4; do
             docker rm -f "wmci${k}-mariadb" "wmci${k}-couchdb" 2>/dev/null || true
             ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
             [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
             docker network rm "wmci${k}_stacknet" 2>/dev/null || true
           done
+          # lint container from a killed/cancelled run (project wmcipl)
+          ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmcipl" 2>/dev/null || true)
+          [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
           docker network rm wmciwarm_stacknet 2>/dev/null || true
-          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 unit-test-xml
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 ci-stack-4 unit-test-xml
           docker ps
 
-      # one pull before the fan-out: three stacks pulling the same images
+      # one pull before the fan-out: stacks pulling the same images
       # concurrently race each other in the local image store
       - name: Warm images once
         run: |
@@ -193,9 +208,11 @@ jobs:
       # Each stack: own compose project, own workspace, own RAM data dir, own
       # /24 bridge subnet, own host egress proxy. Inside a stack the slices
       # still run one after another, with the Jenkinsfile's retry(5).
+      # The lint container (host-networked, no databases, no egress proxy
+      # needed) runs beside the stacks as a fifth background process.
       # This step never decides the job outcome - the integrity check below
-      # does - so a teardown hiccup cannot turn a complete run red.
-      - name: Run 3 stacks in parallel (balanced slice groups)
+      # does - so a teardown or lint hiccup cannot turn a complete run red.
+      - name: Run 4 stacks and pylint in parallel
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -207,7 +224,7 @@ jobs:
           export WMCI_NET="9$K"
           export WMCI_PROXY="http://127.0.0.1:3128"
           rc=0
-          # stagger the starts: three simultaneous container creations on this
+          # stagger the starts: simultaneous container creations on this
           # VM's docker daemon occasionally trip over each other
           sleep $(( (K-1) * 20 ))
           bash wmcore-src/.github/ci/setup-env-gha.sh
@@ -217,11 +234,21 @@ jobs:
           test -S "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" || { echo "[S$K] proxy socket missing"; exit 1; }
           docker compose down --remove-orphans || true
           docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
-          sleep 20
+          # compose already waits for couchdb (condition: service_healthy), but
+          # mariadb is only service_started and its init script provisions the
+          # wmagent database ~12-18 s after that. Poll for its completion
+          # marker instead of a fixed sleep 20; running a slice before the
+          # grants exist would bake DB errors into results that look valid.
+          mdb=""
+          for i in $(seq 1 150); do
+            if docker compose logs mariadb 2>/dev/null | grep -q "Start sleeping"; then mdb=1; break; fi
+            sleep 2
+          done
+          [ -n "$mdb" ] || echo "[S$K] warning: mariadb init marker not seen after 300s, continuing"
           ready=""
-          for i in $(seq 1 60); do
+          for i in $(seq 1 150); do
             if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
-            sleep 5
+            sleep 2
           done
           [ -n "$ready" ] || { echo "[S$K] entrypoint setup failed"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
           # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so
@@ -242,6 +269,7 @@ jobs:
               if docker compose exec -T -u "$MY_ID" \
                    -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
                    -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+                   -e WMCORE_TEST_EXIT_ALARM=10 \
                    -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
                    "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
                 ok=1; break
@@ -252,21 +280,63 @@ jobs:
             echo "STACK$K slice=$S ok=$ok wall_seconds=$(( $(date +%s) - s0 ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
           done
           echo "STACK$K total_wall_seconds=$(( $(date +%s) - stack_start ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
-          docker compose down || true
+          # backgrounded: teardown (~20 s of SIGTERM grace) must not gate the
+          # step's wait; the Stop stacks step force-reaps whatever is left
+          (docker compose down || true) >/dev/null 2>&1 &
           kill "$(cat "$HOST_MOUNT_DIR/proxy.pid")" 2>/dev/null || true
           exit $rc
           RUNNER
           chmod +x stack-runner.sh
+          # the lint twin of the old pylint job, as a background process. It
+          # starts at t=90s, after every stack's container-creation burst
+          # (staggers 0/20/40/60) and after Warm images, and hides completely
+          # inside the stacks' runtime. Own compose project + workspace; env
+          # stays inside this script (HOST_MOUNT_DIR in GITHUB_ENV would
+          # repoint the job-level docker compose calls).
+          cat > pylint-runner.sh <<'LINT'
+          #!/bin/bash
+          sleep 90
+          export COMPOSE_PROJECT_NAME=wmcipl
+          export HOST_MOUNT_DIR="$GITHUB_WORKSPACE/ci-workspace"
+          export WMCI_MDB_DATA_DIR="/dev/shm/wmci-mdb-$(id -u)-pl"
+          bash wmcore-src/.github/ci/setup-env-gha.sh
+          rm -rf "$WMCI_MDB_DATA_DIR"   # lint starts no databases
+          docker compose up -d wmcore-pr-pylint
+          ready=""
+          for i in $(seq 1 150); do
+            if docker compose exec -T wmcore-pr-pylint test -f /home/cmsbld/TestScripts/pylintPRTest.sh; then ready=1; break; fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { echo "[lint] entrypoint setup failed"; docker compose logs wmcore-pr-pylint | tail -n 25; exit 1; }
+          # same fork redirect as the stacks; delete when moving upstream
+          docker compose exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
+            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
+            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
+          docker compose exec -T \
+            -e ghprbPullId="$ghprbPullId" -e ghprbTargetBranch="$ghprbTargetBranch" \
+            -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
+          rc=$?
+          (docker compose down || true) >/dev/null 2>&1 &
+          exit $rc
+          LINT
+          chmod +x pylint-runner.sh
           overall=$(date +%s)
           ./stack-runner.sh 1 $STACK1_SLICES > stack1.log 2>&1 & P1=$!
           ./stack-runner.sh 2 $STACK2_SLICES > stack2.log 2>&1 & P2=$!
           ./stack-runner.sh 3 $STACK3_SLICES > stack3.log 2>&1 & P3=$!
+          ./stack-runner.sh 4 $STACK4_SLICES > stack4.log 2>&1 & P4=$!
+          ./pylint-runner.sh > pylint.log 2>&1 & PL=$!
           wait $P1 || echo "stack1 reported a failing slice or setup error"
           wait $P2 || echo "stack2 reported a failing slice or setup error"
           wait $P3 || echo "stack3 reported a failing slice or setup error"
+          wait $P4 || echo "stack4 reported a failing slice or setup error"
+          wait $PL || echo "pylint exited nonzero (see pylint.log; the report job posts the authoritative Py3 Pylint status)"
           echo "PARALLEL total_wall_seconds=$(( $(date +%s) - overall ))"
           echo "--- stack logs (tails) ---"
-          tail -n 25 stack1.log stack2.log stack3.log || true
+          tail -n 25 stack1.log stack2.log stack3.log stack4.log pylint.log || true
           # deliberately green: the XML integrity check is the gate
           exit 0
 
@@ -302,6 +372,20 @@ jobs:
             stack1.log
             stack2.log
             stack3.log
+            stack4.log
+            pylint.log
+          if-no-files-found: warn
+
+      # twin of the old pylint job's upload; the report job downloads this
+      # artifact by its exact name, so the name must stay "lint-reports"
+      - name: Upload lint results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lint-reports
+          path: |
+            ci-workspace/artifacts/pylintpy3Report.json
+            ci-workspace/artifacts/pep8py3.txt
           if-no-files-found: warn
 
       # the job's verdict: every slice produced a parseable XML and the run
@@ -338,7 +422,7 @@ jobs:
                               f"{s.get('failures')} failures, {s.get('errors')} errors")
           missing = [s for s in expected if s not in seen]
           timing = open('stack-timing.txt').read() if os.path.exists('stack-timing.txt') else ''
-          lines = ['## WMCore PR unit tests (3 parallel stacks)', '',
+          lines = ['## WMCore PR unit tests (4 parallel stacks)', '',
                    f'**{total} tests** in {len(seen)}/{len(expected)} slices, '
                    f'{fails} failures, {errs} errors', ''] + rows + ['', '```', timing, '```']
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
@@ -357,87 +441,17 @@ jobs:
       - name: Stop stacks
         if: always()
         run: |
-          for k in 1 2 3; do
+          for k in 1 2 3 4; do
             [ -f "ci-stack-$k/proxy.pid" ] && kill "$(cat "ci-stack-$k/proxy.pid")" 2>/dev/null || true
             ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
             [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
             docker network rm "wmci${k}_stacknet" 2>/dev/null || true
             rm -rf "/dev/shm/wmci-mdb-$(id -u)-$k"
           done
+          ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmcipl" 2>/dev/null || true)
+          [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
+          rm -rf "/dev/shm/wmci-mdb-$(id -u)-pl"
           docker ps
-
-  pylint:
-    needs: begin
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 45
-    steps:
-      - name: Checkout this repo (CI glue)
-        uses: actions/checkout@v4
-        with:
-          path: wmcore-src
-
-      - name: Runtime environment
-        run: |
-          echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
-          echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
-          echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
-          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
-
-      - name: Prepare workspace (fork twin of setup-env.sh)
-        run: bash wmcore-src/.github/ci/setup-env-gha.sh
-
-      - name: Start pylint container
-        run: |
-          docker compose up --quiet-pull -d wmcore-pr-pylint
-          docker ps
-
-      # same readiness wait as in unit-tests: the entrypoint needs time to
-      # clone WMCore and copy the CI scripts before we can exec them
-      - name: Wait for container CI setup
-        run: |
-          ready=""
-          for i in $(seq 1 60); do
-            if docker compose exec -T wmcore-pr-pylint test -f /home/cmsbld/TestScripts/pylintPRTest.sh; then ready=1; break; fi
-            sleep 5
-          done
-          if [ -z "$ready" ]; then
-            echo "Entrypoint setup did not finish in time; container logs:"
-            docker compose logs wmcore-pr-pylint
-            exit 1
-          fi
-          docker compose logs wmcore-pr-pylint
-
-      # same fork redirect as in unit-tests; delete when moving upstream
-      - name: Point dmwm/WMCore at this fork
-        run: |
-          docker compose exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
-            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
-            git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
-            git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
-            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
-
-      - name: Run pylint and pycodestyle (unchanged script)
-        run: |
-          docker compose exec -T \
-            -e ghprbPullId="$ghprbPullId" -e ghprbTargetBranch="$ghprbTargetBranch" \
-            -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
-            wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
-
-      - name: Upload lint results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: lint-reports
-          path: |
-            ci-workspace/artifacts/pylintpy3Report.json
-            ci-workspace/artifacts/pep8py3.txt
-          if-no-files-found: warn
-
-      - name: Stop containers
-        if: always()
-        run: |
-          [ -n "$COMPOSE_FILE" ] && docker compose down || true
 
   # fork twin of WMCore-PR-Report stages "Copy artifacts" + "Generate Reports".
   # Jenkins runs the unchanged PullRequestReport.py on the agent in a venv;
@@ -447,7 +461,10 @@ jobs:
   # "Jenkins results:" comment and the Py3 Unit tests / Py3 Pylint statuses.
   # Like Jenkins (propagate: false), it runs even when unit tests failed.
   report:
-    needs: [begin, unit-tests, pylint]
+    # NOT gated on the unit-tests result: like Jenkins (propagate: false),
+    # the report must post the "Jenkins results:" comment and the statuses
+    # even when the test job failed
+    needs: [begin, unit-tests]
     if: ${{ !cancelled() && needs.begin.result == 'success' }}
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
@@ -551,23 +568,12 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
             -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
 
-  summary:
-    needs: [unit-tests, pylint]
-    if: always()
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
-    steps:
-      # the workspace persists between runs on a self-hosted runner; drop
-      # stale results so the counts only cover this run
-      - name: Clean stale results
-        run: rm -rf results
-
-      - name: Download all results
-        uses: actions/download-artifact@v4
-        with:
-          path: results
-
+      # twin of the old summary job, inlined: this job already downloaded the
+      # PR results (LatestUnitTests) and lint output (LatestPylint). Globs
+      # ONLY LatestUnitTests - MasterUnitTests holds baseline XMLs with the
+      # same file-name shape, and counting them would double every number.
       - name: Write run summary
+        if: always()
         run: |
           python3 - <<'EOF'
           import glob, os
@@ -576,7 +582,7 @@ jobs:
           except ImportError:
               import xml.etree.ElementTree as ET
           tests = failures = errors = skipped = 0
-          for f in glob.glob('results/**/nosetests*.xml', recursive=True):
+          for f in glob.glob('LatestUnitTests/**/nosetests*.xml', recursive=True):
               try:
                   suite = ET.parse(f).getroot()
               except ET.ParseError:
@@ -589,8 +595,8 @@ jobs:
                    f'| Tests | Failures | Errors | Skipped |',
                    f'|---|---|---|---|',
                    f'| {tests} | {failures} | {errors} | {skipped} |', '']
-          if os.path.exists('results/lint-reports/pep8py3.txt'):
-              n = sum(1 for _ in open('results/lint-reports/pep8py3.txt'))
+          if os.path.exists('LatestPylint/pep8py3.txt'):
+              n = sum(1 for _ in open('LatestPylint/pep8py3.txt'))
               lines.append(f'pycodestyle: {n} comments to review (informational, like Jenkins)')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('\n'.join(lines) + '\n')
