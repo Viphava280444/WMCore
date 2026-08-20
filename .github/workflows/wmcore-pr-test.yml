@@ -581,11 +581,13 @@ jobs:
           state=failure
           [ "${{ job.status }}" = "success" ] && state=success
           if [ -z "$HEAD_SHA" ]; then
-            HEAD_SHA=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            HEAD_SHA=$(curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
               "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ghprbPullId}" \
               | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
           fi
-          curl -sf -X POST -H "Authorization: Bearer $GH_TOKEN" \
+          # --retry: a transient 5xx AFTER the server committed the write once
+          # turned this whole run red (exit 22) although the status was posted
+          curl -sf --retry 3 --retry-all-errors -X POST -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
             -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
 
