@@ -497,12 +497,22 @@ jobs:
       # downloads below (file names embed the run id and would accumulate).
       # Unstable-test list read from this fork's master instead of dmwm master.
       - name: Set up report environment
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          rm -rf report-venv LatestUnitTests LatestPylint MasterUnitTests artifacts UnstableTests.txt
+          rm -rf report-venv LatestUnitTests LatestPylint MasterUnitTests artifacts UnstableTests.txt KnownFailures.txt report-stdout.txt
           python3 -m venv report-venv
           report-venv/bin/pip -q install jinja2 xunitparser PyGithub
           curl -sf -o UnstableTests.txt \
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/test/etc/UnstableTests.txt"
+          # known-failures manifest for the run summary: PR head first (a PR
+          # that FIXES a known failure deletes its line in the same PR), fork
+          # master as fallback. Explains only - it has no vote in the gate.
+          curl -sf -o KnownFailures.txt \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${HEAD_SHA:-master}/test/etc/KnownFailures.txt" \
+            || curl -sf -o KnownFailures.txt \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/test/etc/KnownFailures.txt" \
+            || echo "no KnownFailures.txt available - every failing test will list as unexplained"
           mkdir -p artifacts
 
       # these two tolerate missing artifacts (e.g. a job died before its
@@ -591,7 +601,12 @@ jobs:
           grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
             || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
           sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
-          report-venv/bin/python "$RUNNER_TEMP/PullRequestReport.py"
+          # tee the output: the run-summary step reads the printed
+          # "Python3 Unit Test summary {...}" dict instead of recomputing the
+          # gate itself (two implementations of the gate would eventually
+          # disagree on the same page). pipefail keeps a python crash fatal.
+          set -o pipefail
+          report-venv/bin/python "$RUNNER_TEMP/PullRequestReport.py" 2>&1 | tee report-stdout.txt
 
       - name: Upload PR report
         if: always()
@@ -624,36 +639,128 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
             -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
 
-      # twin of the old summary job, inlined: this job already downloaded the
-      # PR results (LatestUnitTests) and lint output (LatestPylint). Globs
-      # ONLY LatestUnitTests - MasterUnitTests holds baseline XMLs with the
-      # same file-name shape, and counting them would double every number.
+      # Operator-readable summary. Three rules keep it honest:
+      # 1. The gate verdict is NEVER recomputed here - line 1 quotes the
+      #    summary dict PullRequestReport.py printed (report-stdout.txt).
+      # 2. KnownFailures.txt only EXPLAINS the tests that fail on both sides;
+      #    it has no vote in the gate.
+      # 3. A failing test in NEITHER KnownFailures.txt NOR UnstableTests.txt
+      #    renders as a loud UNEXPLAINED section - that is the real signal.
+      # Globs ONLY LatestUnitTests - MasterUnitTests holds baseline XMLs with
+      # the same file-name shape, and counting them would double every number.
       - name: Write run summary
         if: always()
         run: |
-          python3 - <<'EOF'
-          import glob, os
+          python3 - <<'EOF' || echo "::warning::run-summary rendering failed; statuses and PR comment are unaffected"
+          import ast, glob, os, re
           try:
               from defusedxml import ElementTree as ET
           except ImportError:
               import xml.etree.ElementTree as ET
-          tests = failures = errors = skipped = 0
+
+          def load_manifest(path):
+              fams, known, kskips, section = {}, {}, {}, None
+              if os.path.exists(path):
+                  for raw in open(path, encoding='utf-8'):
+                      line = raw.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      if line in ('[families]', '[tests]', '[skips]'):
+                          section = line
+                          continue
+                      parts = [p.strip() for p in line.split('|')]
+                      if section == '[families]' and len(parts) >= 4:
+                          fams[parts[0]] = {'reason': parts[2], 'fixpath': parts[3]}
+                      elif section == '[tests]' and len(parts) >= 2:
+                          known[parts[0]] = parts[1]
+                      elif section == '[skips]' and len(parts) >= 2:
+                          kskips[parts[0]] = parts[1]
+              return fams, known, kskips
+
+          tests = failures = errors = skipped = badfiles = 0
+          failing = {}
           for f in glob.glob('LatestUnitTests/**/nosetests*.xml', recursive=True):
               try:
-                  suite = ET.parse(f).getroot()
-              except ET.ParseError:
+                  root = ET.parse(f).getroot()
+              except Exception:
+                  badfiles += 1
                   continue
-              suites = [suite] if suite.tag == 'testsuite' else suite.findall('testsuite')
+              suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')
               for s in suites:
                   tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
                   errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
-          lines = ['## WMCore PR test results', '',
-                   f'| Tests | Failures | Errors | Skipped |',
-                   f'|---|---|---|---|',
-                   f'| {tests} | {failures} | {errors} | {skipped} |', '']
+              for tc in root.iter('testcase'):
+                  for b in list(tc):
+                      if b.tag in ('error', 'failure'):
+                          failing[tc.get('classname', '?') + ':' + tc.get('name', '?')] = b.tag
+
+          gate = None
+          try:
+              stdout = open('report-stdout.txt', encoding='utf-8', errors='replace').read()
+              m = re.search(r'Python3 Unit Test summary (\{.*\})', stdout)
+              if m:
+                  gate = ast.literal_eval(m.group(1))
+          except Exception:
+              pass
+
+          fams, known, _kskips = load_manifest('KnownFailures.txt')
+          unstable = set()
+          try:
+              unstable = {l.strip() for l in open('UnstableTests.txt')
+                          if l.strip() and not l.startswith('#')}
+          except OSError:
+              pass
+
+          by_family, unexplained = {}, []
+          for tid in sorted(failing):
+              if tid in known:
+                  by_family.setdefault(known[tid], []).append(tid)
+              elif tid in unstable:
+                  by_family.setdefault('(unstable list)', []).append(tid)
+              else:
+                  unexplained.append(tid)
+
+          L = ['## WMCore PR test results', '']
+          if gate is not None:
+              nf = gate.get('newFailures')
+              if nf == 0:
+                  L.append('**Gate verdict: PASS - 0 new failures.** This PR breaks nothing '
+                           'that master does not already have. Report counters: `%s`' % gate)
+              else:
+                  L.append('**Gate verdict: %s new failure(s).** The report flagged tests that '
+                           'pass on the master baseline but fail in this run - see the PR '
+                           'comment and the pr-report artifact. Report counters: `%s`' % (nf, gate))
+          else:
+              L.append('**Gate verdict unavailable** - the report step did not print its '
+                       'summary dict (see the "Generate report" step log). The commit '
+                       'statuses are the authority.')
+          L += ['', '| Tests | Failures | Errors | Skipped |', '|---|---|---|---|',
+                '| %d | %d | %d | %d |' % (tests, failures, errors, skipped), '',
+                'The %d failing tests do NOT block this PR: the gate compares against '
+                'master, and these fail the same way there. Each one is tracked in '
+                '`test/etc/KnownFailures.txt` with its cause and fix path.' % (failures + errors), '']
+          if by_family:
+              L += ['| Known-failure family | Today | Cause | Fix path |', '|---|---|---|---|']
+              for fam in sorted(by_family, key=lambda k: -len(by_family[k])):
+                  meta = fams.get(fam, {})
+                  L.append('| %s | %d | %s | %s |' % (
+                      fam, len(by_family[fam]),
+                      meta.get('reason', 'flip-prone; forgiven via UnstableTests.txt'),
+                      meta.get('fixpath', 'test/etc/UnstableTests.txt')))
+              L.append('')
+          if unexplained:
+              L += ['### :warning: %d UNEXPLAINED failing test(s) - investigate' % len(unexplained),
+                    'These match neither KnownFailures.txt nor UnstableTests.txt. '
+                    'They are the real signal on this page:', '']
+              L += ['- `%s` (%s)' % (t, failing[t]) for t in unexplained]
+              L.append('')
+          else:
+              L += ['No unexplained failures: every failing test above is a documented known failure.', '']
+          if badfiles:
+              L.append(':warning: %d result XML file(s) could not be parsed; counts above exclude them.' % badfiles)
           if os.path.exists('LatestPylint/pep8py3.txt'):
               n = sum(1 for _ in open('LatestPylint/pep8py3.txt'))
-              lines.append(f'pycodestyle: {n} comments to review (informational, non-blocking)')
+              L.append('pycodestyle: %d comments to review (informational, non-blocking)' % n)
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write('\n'.join(lines) + '\n')
+              out.write('\n'.join(L) + '\n')
           EOF

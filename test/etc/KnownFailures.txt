@@ -1,0 +1,163 @@
+# WMCore CI - KNOWN FAILING TESTS MANIFEST
+#
+# WHAT THIS FILE IS
+#   Every unit test that is currently expected to fail on BOTH master and any PR,
+#   with the family it belongs to, why it fails, and what would fix it.
+#   It EXPLAINS failures. It does NOT forgive anything.
+#
+# WHAT DECIDES THE GATE (this file has no vote)
+#   The PR gate is a diff against the newest successful master baseline run.
+#   A test turns the gate red only when it PASSES on the baseline and FAILS on the PR.
+#   A test that fails identically on both sides never enters any diff bucket and is
+#   silently forgiven by the comparison itself - that is what this file documents.
+#   test/etc/UnstableTests.txt is a DIFFERENT list: it forgives baseline->PR status
+#   FLIPS for non-deterministic tests. A test can be in both files, in either, or
+#   in neither. Adding a test here can never make a red run green.
+#
+# WHO READS IT
+#   The "Write run summary" step of .github/workflows/wmcore-pr-test.yml renders the
+#   families table in the GitHub Actions run summary from this file, and shouts about
+#   any failing test that appears in NEITHER this file NOR UnstableTests.txt.
+#
+# FORMAT (plain text, pipe-delimited, python3 stdlib parseable)
+#   [families]  slug | fix-class | one-line reason | fix path
+#   [tests]     classname:testMethod | family-slug
+#   [skips]     classname:testMethod | skip-class
+#   The key is the nose-collected classname exactly as recorded in the result
+#   XML - often NOT fully qualified (e.g. MSUnmerged_t.MSUnmergedTest:testCutPath,
+#   Api_t.Tester:test_multi_throw5b). Copy it from the XML or from the summary page.
+#   '#' starts a comment. Fields are stripped. No pipes inside a field.
+#
+#   fix-class is who has to act:
+#     test-fix          change only test code
+#     test-infra-fix    change shared test harness under src/python/WMQuality
+#     test-harness-fix  change the nose/webtest bootstrap, not a single test
+#     product+test-fix  a real src/python product bug is part of it
+#     ci-config         the CI stack/compose/env is wrong, not the code
+#     admin-request     someone outside this repo must grant something
+#     flaky             non-deterministic; also listed in UnstableTests.txt
+#
+# MAINTENANCE
+#   New pre-existing failure appears  -> the run summary prints it under
+#                                        "UNEXPLAINED - investigate". Triage it, then
+#                                        add one [tests] line (and a [families] row if
+#                                        it is a new cause) in the same PR.
+#   A known failure gets fixed        -> the run summary prints it under
+#                                        "FIXED - remove from manifest". Delete its
+#                                        [tests] line in the PR that fixed it.
+#   Never delete a line to quiet the summary. Deleting a line for a still-failing test
+#   moves it straight into the loud UNEXPLAINED section.
+#
+# Counts as of baseline run 32377920419 / acceptance run 32399324762 (2026-08-18):
+#   1653 tests, 29 failures, 36 errors, 14 skipped -> 65 failing, all listed below.
+#   63 of them fail identically on the baseline; 2 (flaky-workqueue) passed on the
+#   baseline and were forgiven as unstable flips.
+
+[families]
+# slug | fix-class | reason | fix path
+cric-live-topology-drift | test-fix | CRIC_t and ResubmitBlock_t call the LIVE cms-cric.cern.ch while the code under test uses the frozen MockCRICApi, and real CMS topology moved (T3_US_FNALLPC now under T1_US_FNAL, T3_CH_CERNBOX renamed T2_CH_CERNBOX, T2_CH_CERN_P2 added) | Add WMCore_t.Services_t.CRIC_t.CRIC_t.CRIC to EmulatedUnitTestCase.patchCRICAt (src/python/WMQuality/Emulators/EmulatedUnitTestCase.py:106-110) and derive the PSN list in ResubmitBlock_t.py:61-63 from the same mock the WorkQueue uses; or move CRIC_t to recorded fixtures + @attr('integration')
+rucio-int-live-data | test-fix | Unit tests read the live cms-rucio-int instance through the local squid at 127.0.0.1:3128 and its contents drift independently of WMCore (RSE ids, EOS protocol moved gsiftp->davs, reference pileup container gone, bulk replica call times out at 30s) | Mock the Rucio client for the unit tier and move these four to @attr('integration') so they run in a nightly integration job instead of the PR gate
+rucio-dn-not-registered | admin-request | MSUnmerged_t authenticates to rucio-int as service account wmcore_transferor using the runner certificate, whose DN is not a registered identity on that account, so every test in the class dies in setUp with CannotAuthenticate | Register the CI certificate DN as an identity on wmcore_transferor at cms-rucio-int (or issue a dedicated CI account); alternatively mock the Rucio client in MSUnmerged_t so no real credential is needed
+external-http-service | test-fix | Tests make live HTTPS calls to public CERN services and get non-answers from this runner - empty reason from cmsweb-testbed HEAD, closed connection from the remote LumiList JSON, HTML instead of JSON from the live DBS error path | Replace with mocked HTTP responses or mark @attr('integration') so the PR gate never depends on cmsweb-testbed or DBS uptime; secondary, confirm runner egress and proxy config if the team wants them live
+emulator-fixtures-stale | test-fix | WMQuality emulator fixtures lag what they emulate - MockDbsApi_t diffs its recorded payloads against the LIVE production DBS which has gained data tiers, and MockRucioApi has no recorded signature for getBlocksInContainer which production code now calls | Regenerate the DBSClient mock data or drop the live-DBS comparison, and add a getBlocksInContainer signature and payload to src/python/WMQuality/Emulators/RucioClient/MockRucioApi.py MOCK_DATA
+cherrypy-test-server-lifecycle | test-infra-fix | Six tests start CherryPy inside the test process on hardcoded ports 8888/9988 with no wait-for-listen, sharing one process-global cherrypy.engine that is started and stopped repeatedly within a single nose slice - connection refused, threads-can-only-be-started-once, and QueueShutDown are all the same defect | Poll until the port accepts a connection before the first request, bind an ephemeral port instead of 8888/9988, and give each test class a fresh cherrypy Bus, in src/python/WMQuality/CherrypyTestInit.py and src/python/WMQuality/REST/RESTBaseUnitTest*.py - single highest-leverage fix, retires 6 of the 65
+shared-interpreter-state | product+test-fix | Order-dependent pollution of process-global state inside one slice, proven by the same code passing in a different slice - cherrypy.request.user left as a plain string, the process main thread renamed to WorkQueue, and auth headers absent from cherrypy.request | Defensive read of cherrypy.request.user at src/python/Utils/Throttled.py:129 and its UserThrottle twin, which is genuine product hardening, plus MSPileup_t setting up its own cherrypy request context and thread name in setUp instead of inheriting the slice
+tty-masked-failure | test-harness-fix | The recorded error is a red herring - cheroot webtest enters its INTERACTIVE error handler on assertion failure, termios fails on a headless runner, and termios.error replaces the real assertHeader X-REST-Status 200 message from test/python/WMCore_t/REST_t/Api_t.py:227 | Set webtest.WebCase.interactive = False in setup_test.py or export WEBTEST_INTERACTIVE=false in the workflow so the real assertion text reaches the XML, then re-triage this one test
+test-vs-source-api-drift | test-fix | Six tests call APIs that production code renamed, re-signed or reshaped and were never updated - Job.getFileLocations does not exist, the poller attribute is reqmgr2 not reqmgr, getActiveData now needs listStatuses, WorkQueue now needs rucioUrl, and CouchMonitor now returns a bare list | One- to two-line updates in each test, no product change - the cheapest six of the 65 to clear
+python312-incompatibility | product+test-fix | Python 3.11 and 3.12 removals plus py2 leftovers - the assertEquals alias is gone, inline global regex flags are rejected which means the credential scrubber replaceToSantizeURL is BROKEN IN PRODUCTION on py>=3.11 and not merely in its test, and NestedModel_t still expects bytes bodies | Fix src/python/WMCore/Lexicon.py:683 by moving the flag to the start of the pattern or passing re.IGNORECASE - a real product bug and an upstream dmwm PR candidate - then assertEquals to assertEqual in RucioInjectorPoller_t and align bytes/str in NestedModel_t
+missing-test-data-file | test-fix | test/data/ReqMgr/requests/DMWM/ReReco_RunBlockWhite.json is not in the repository any more but two setUp methods still open it, so their testcases error before any assertion runs | Restore the JSON fixture, or repoint test/python/WMCore_t/Services_t/ReqMgr_t/ReqMgr_t.py:70 and test/python/WMCore_t/ReqMgr_t/Service_t/ReqMgr_t.py:71 at the surviving ReReco_RunBlocklists_Parents.json and adjust the expected fields
+couchdb-image-payload | ci-config | CMSCouch_t asserts that the CouchDB welcome document contains a vendor key, at test/python/WMCore_t/Database_t/CMSCouch_t.py:493; the document is otherwise valid and the couchdb Welcome assertion above it passes, but the deployed CouchDB image does not return that key | Pin the CouchDB image the tests were written against in the compose stack, or assert only the keys the deployed CouchDB guarantees and gate vendor and features on the version string
+mysql-dbname-mismatch | ci-config | WMInit_t asserts the connected schema is named wmcore_unittest or WMCore_unit_test, at test/python/WMCore_t/WMInit_t.py:56, while the CI stack points DATABASE at a schema named wmagent - pure environment mismatch with nothing wrong in the product | Set DATABASE to a wmcore_unittest schema in the workflow env and in the compose MySQL init, or compare against the configured database name from the environment instead of a hardcoded pair
+taskarchiver-pipeline | test-fix | TaskArchiverTest drives the whole TaskArchiverPoller and CleanCouchPoller pipeline against CI MySQL and CouchDB using fixtures with hardcoded ids and timestamps - archiving leaves 20 wmbs_job rows, failureTime is computed from a years-stale epoch, and a dbsbuffer_file insert violates its FK because the fixtures are inserted in the wrong order | Create the algo and dataset assoc rows before the dbsbuffer_file, compute the expected failureTime relative to now instead of a frozen epoch, and capture the poller log before touching testA - highest-effort family here, do not gate the other 62 behind it
+fixture-filesystem-layout | test-fix | Three tests assume a local filesystem layout that is never actually produced - the sandbox has no pickled WMWorkload, the generated site-local-config.xml has no stage-out section which SiteLocalConfig now rejects, and a tarball is extracted into the process CWD then stat'ed by relative path | Write WMWorkload.pkl into the sandbox before executing the step, add a stage-out block to the generated site-local-config XML, and extract the tarball with -C tmpdir asserting on the absolute extracted path
+env-dependent-numeric-assertions | test-fix | Three assertions hardcode numbers that stopped being true on this Python and host and none of them tests product behaviour - ru_utime after a sleep is 0, the py3.12 object footprint fell under a threshold whose own comment reads py3 205, and the live nose process legitimately has threads | Make each assertion describe the invariant instead of a magic number - burn measurable CPU in the child, assert getSize returns a plausible positive int, and assert the threads info is a well-formed list
+wmbs-parentage-copypaste | test-fix | A copy-paste bug that can never pass - test/python/WMCore_t/WMBS_t/File_t.py:1034-1040 reloads testFileA and asserts testFileParentA is not among its parents, contradicting lines 1008-1012 of the same test, while lines 1042-1048 already perform the intended check against testFileC | One line - load testFileC at File_t.py:1034, or delete the duplicated block since lines 1042-1048 already assert the real behaviour
+fwjr-fixture-drift | test-fix | Two hardcoded FrameworkJobReport fixtures no longer match current code and couchapp views - a pre-PNN location cmssrm.fnal.gov makes the accountant reject the report and the test only surfaces the final jobfailed state, and the skippedFileInfoByTaskAndSite view emits no rows for SAMPLE_FWJR so indexing row zero raises | Use a valid PNN in ReportIntegration_t and assert on the accountant's own failure reason rather than only the job state, and make SAMPLE_FWJR contain skipped files in the shape the view map function emits
+flaky-workqueue | flaky | Timing and couch-view-lag dependent - both PASS on the current and previous master baselines and failed only in this run, so they are baseline->PR flips forgiven by test/etc/UnstableTests.txt rather than steady-state failures | Add an explicit wait-for-view-update in WorkQueue_t instead of relying on timing; until then they stay listed in UnstableTests.txt
+
+[tests]
+# fully.qualified.Class:testMethod | family-slug
+WMCore_t.Services_t.CRIC_t.CRIC_t.CRICTest:testPNNstoPSNs | cric-live-topology-drift
+WMCore_t.Services_t.CRIC_t.CRIC_t.CRICTest:testPNNtoPSNMap | cric-live-topology-drift
+WMCore_t.Services_t.CRIC_t.CRIC_t.CRICTest:testPSNstoPNNs | cric-live-topology-drift
+WMCore_t.Services_t.CRIC_t.CRIC_t.CRICTest:testPSNtoPNNMap | cric-live-topology-drift
+WMCore_t.WorkQueue_t.Policy_t.Start_t.ResubmitBlock_t.ResubmitBlockTest:testFixedSizeChunksSplit | cric-live-topology-drift
+WMCore_t.WorkQueue_t.Policy_t.Start_t.ResubmitBlock_t.ResubmitBlockTest:testLocalQueueACDCSplit | cric-live-topology-drift
+WMCore_t.WorkQueue_t.Policy_t.Start_t.ResubmitBlock_t.ResubmitBlockTest:testMergeACDCSpec | cric-live-topology-drift
+WMCore_t.WorkQueue_t.Policy_t.Start_t.ResubmitBlock_t.ResubmitBlockTest:testSingleChunksSplit | cric-live-topology-drift
+WMCore_t.Services_t.Rucio_t.Rucio_t.RucioTest:testGetAccountUsage | rucio-int-live-data
+WMCore_t.Services_t.Rucio_t.Rucio_t.RucioTest:testGetPFN | rucio-int-live-data
+WMCore_t.Services_t.Rucio_t.Rucio_t.RucioTest:testGetReplicaInfoForBlocks | rucio-int-live-data
+WMCore_t.MicroService_t.Tools_t.PycurlRucio_t.PycurlRucioTests:testGetPileupContainerSizesRucio | rucio-int-live-data
+MSUnmerged_t.MSUnmergedTest:testCutPath | rucio-dn-not-registered
+MSUnmerged_t.MSUnmergedTest:testFilterExclDirectories | rucio-dn-not-registered
+MSUnmerged_t.MSUnmergedTest:testFilterInclDirectories | rucio-dn-not-registered
+MSUnmerged_t.MSUnmergedTest:testFilterInclExclDirectories | rucio-dn-not-registered
+MSUnmerged_t.MSUnmergedTest:testPlineUnmerged | rucio-dn-not-registered
+WMCore_t.Services_t.pycurl_manager_t.PyCurlManager:testHeadRequest | external-http-service
+WMCore_t.Services_t.pycurl_manager_t.PyCurlManager:testHeadGzip | external-http-service
+WMCore_t.DataStructs_t.LumiList_t.LumiListTest:testURL | external-http-service
+WMCore_t.Services_t.DBS_t.DBSErrors_t.DBSErrorsTest:testDBSErrorViaDBSClient | external-http-service
+WMCore_t.Services_t.DBS_t.DBSErrors_t.DBSErrorsTest:testDBSErrorException | external-http-service
+WMQuality_t.Emulators_t.DBSClient_t.MockDbsApi_t.MockDbsApiTest:testDBSApiMembers | emulator-fixtures-stale
+WMCore_t.MicroService_t.MSPileup_t.MSPileupTasks_t.MSPileupTasksTest:testPartialPileupTask | emulator-fixtures-stale
+Daemon_t.TaskTest:test | cherrypy-test-server-lifecycle
+WMCore_t.Services_t.pycurlFileUpload_t.PyCurlRESTServer:testFailingFileUpload | cherrypy-test-server-lifecycle
+WMCore_t.ReqMgr_t.Service_t.Auxiliary_t.AuxiliaryTest:testCampaignConfig | cherrypy-test-server-lifecycle
+WMCore_t.ReqMgr_t.Service_t.Auxiliary_t.AuxiliaryTest:testCMSSWVersions | cherrypy-test-server-lifecycle
+WMCore_t.MicroService_t.MicroService_t.MicroServiceTest:testGetStatusIdentity | cherrypy-test-server-lifecycle
+WMCore_t.Services_t.Requests_t.testRepeatCalls:test10Calls | cherrypy-test-server-lifecycle
+Utils_t.Throttled_t.UtilitiesTests:testthrottledTimes | shared-interpreter-state
+Utils_t.Throttled_t.UtilitiesTests:testthrottledTimeRange | shared-interpreter-state
+WMCore_t.MicroService_t.MSPileup_t.MSPileup_t.MSPileupTest:testMSPileupStatus | shared-interpreter-state
+WMCore_t.MicroService_t.MSPileup_t.MSPileup_t.MSPileupTest:testMSPileupUpdate | shared-interpreter-state
+Api_t.Tester:test_multi_throw5b | tty-masked-failure
+WMCore_t.JobSplitting_t.Harvest_t.HarvestTest:testPeriodicTrigger | test-vs-source-api-drift
+WMComponent_t.JobUpdater_t.JobUpdater_t.JobUpdaterTest:test_BasicTest | test-vs-source-api-drift
+WMCore_t.Services_t.WMStats_t.WMStats_t.WMStatsTest:testWMStatsWriter | test-vs-source-api-drift
+WMCore_t.WorkQueue_t.WorkQueueProfile_t.WorkQueueProfileTest:testQueueElementProfile | test-vs-source-api-drift
+WMCore_t.Database_t.CMSCouch_t.CouchMonitorTest:testGetSchedulerJobs | test-vs-source-api-drift
+WMCore_t.Database_t.CMSCouch_t.CouchMonitorTest:testGetSchedulerDocs | test-vs-source-api-drift
+WMComponent_t.RucioInjector_t.RucioInjectorPoller_t.RucioInjectorPollerTest:testLoadingFiles | python312-incompatibility
+WMComponent_t.RucioInjector_t.RucioInjectorPoller_t.RucioInjectorPollerTest:testActivityMap | python312-incompatibility
+WMCore_t.Lexicon_t.LexiconTest:testReplaceToSantizeURL | python312-incompatibility
+WMCore_t.WebTools_t.NestedModel_t.NestedModelTest:testInnerPingPass | python312-incompatibility
+WMCore_t.WebTools_t.NestedModel_t.NestedModelTest:testOuterFooPass | python312-incompatibility
+WMCore_t.Services_t.ReqMgr_t.ReqMgr_t.ReqMgrTest:testRequestClone | missing-test-data-file
+WMCore_t.Services_t.ReqMgr_t.ReqMgr_t.ReqMgrTest:testRequestSimpleCycle | missing-test-data-file
+WMCore_t.ReqMgr_t.Service_t.ReqMgr_t.ReqMgrTest:testRequestSimpleCycle | missing-test-data-file
+WMCore_t.Database_t.CMSCouch_t.CMSCouchTest:testGetWelcome | couchdb-image-payload
+WMCore_t.WMInit_t.WMInit_t:testMySQLDatabase | mysql-dbname-mismatch
+WMComponent_t.TaskArchiver_t.TaskArchiver_t.TaskArchiverTest:testA_BasicFunctionTest | taskarchiver-pipeline
+WMComponent_t.TaskArchiver_t.TaskArchiver_t.TaskArchiverTest:testB_testErrors | taskarchiver-pipeline
+WMComponent_t.TaskArchiver_t.TaskArchiver_t.TaskArchiverTest:testDQMRecoPerformanceToDashBoard | taskarchiver-pipeline
+WMCore_t.WMSpec_t.Steps_t.Executors_t.CMSSW_t.CMSSW_t:testD_ExecuteNoOutput | fixture-filesystem-layout
+WMCore_t.WMRuntime_t.Scripts_t.SetupCMSSWPset_t.SetupCMSSWPsetTest:testPileupSetup | fixture-filesystem-layout
+WMComponent_t.JobArchiver_t.JobArchiver_t.JobArchiverTest:testBasicFunctionTest | fixture-filesystem-layout
+WMCore_t.WMSpec_t.Steps_t.Executors_t.CMSSW_t.CMSSW_t:testSubprocessTime | env-dependent-numeric-assertions
+Utils_t.Utilities_t.UtilitiesTests:testGetSize | env-dependent-numeric-assertions
+Utils_t.ProcessStats_t.TestProcessTHreadsInfo:testProcessThreadsInfo | env-dependent-numeric-assertions
+WMCore_t.WMBS_t.File_t.FileTest:testParentageByMergeJob | wmbs-parentage-copypaste
+WMCore_t.FwkJobReport_t.ReportIntegration_t.ReportIntegrationTest:testReportHandling | fwjr-fixture-drift
+WMCore_t.Services_t.FWJRDB_t.FWJRDBAPI_t.FWJRDBAPITest:testFWJRDBAPI | fwjr-fixture-drift
+WMCore_t.WorkQueue_t.WorkQueue_t.WorkQueueTest:testEndPolicyNegotiating | flaky-workqueue
+WMCore_t.WorkQueue_t.WorkQueue_t.WorkQueueTest:testProductionMultiQueue | flaky-workqueue
+
+[skips]
+# skipped tests are NOT failures - this section only explains the "Skipped" column
+# needs-x509-proxy   : the runner has a certificate but no voms proxy in the expected env
+# parked-by-project  : unconditional skip in the test source, no reason string recorded
+WMCore_t.Services_t.Requests_t.TestRequests:testGetKeyCert | needs-x509-proxy
+WMCore_t.Services_t.Requests_t.TestRequests:testSecureOddPort | needs-x509-proxy
+WMCore_t.Services_t.Requests_t.TestRequests:testSecureOddPort_with_pycurl | needs-x509-proxy
+WMCore_t.Services_t.Requests_t.TestRequests:testSecureWithProxy | needs-x509-proxy
+WMCore_t.Services_t.Requests_t.TestRequests:testSecureWithProxy_with_pycurl | needs-x509-proxy
+WMCore_t.ProcessPool_t.ProcessPool_t.ProcessPoolTest:testA_ProcessPool | parked-by-project
+WMCore_t.ProcessPool_t.ProcessPool_t.ProcessPoolTest:testB_ProcessPoolStress | parked-by-project
+WMCore_t.ProcessPool_t.ProcessPool_t.ProcessPoolTest:testC_MultiPool | parked-by-project
+WMCore_t.Agent_t.Harness_t.HarnessTest:testB | parked-by-project
+WMCore_t.Agent_t.Harness_t.HarnessTest:testC | parked-by-project
+WMCore_t.Agent_t.Harness_t.HarnessTest:testD | parked-by-project
+WMCore_t.ThreadPool_t.ThreadPool_t.ThreadPoolTest:testA | parked-by-project
+WMCore_t.WMBS_t.CursorLeak_t.CursorLeakTest:testCursor | parked-by-project
+WMCore_t.WMBS_t.CursorLeak_t.CursorLeakTest:testLotsOfAncestors | parked-by-project
