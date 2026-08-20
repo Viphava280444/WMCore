@@ -232,6 +232,17 @@ jobs:
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
+          # Hard-sync the image's cached clone to fork master BEFORE the
+          # unchanged script's `git pull origin master` (test-wmcorepy3.sh):
+          # once fork master moves past the clone's baked-in state that pull
+          # is a divergence and git refuses it, killing every slice
+          # (run 32395662435 attempt 2: 11/14 slices produced no XML).
+          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
+            "$TEST_SERVICE" bash -c '
+            cd /home/cmsbld/WMCore
+            git fetch origin master
+            git checkout -q -B master FETCH_HEAD'
           stack_start=$(date +%s)
           for S in $SLICE_LIST; do
             s0=$(date +%s)
@@ -508,6 +519,28 @@ jobs:
           path: MasterUnitTests
           run-id: ${{ steps.baseline.outputs.run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A partial run must never reach PullRequestReport.py: with slices
+      # missing, vanished tests are scored as 'deleted' and the report posts
+      # green statuses from the wreckage (run 32395662435 attempt 2: 11/14
+      # slices lost, deleted=1262, all 3 statuses success). Fail here instead;
+      # the always() default-status step then reports failure honestly.
+      - name: Require complete results (all 14 slices, both sides)
+        run: |
+          python3 - <<'EOF'
+          import glob, re, sys
+          for side in ('LatestUnitTests', 'MasterUnitTests'):
+              seen = set()
+              for f in glob.glob(side + '/*/nosetestspy3-*.xml'):
+                  m = re.search(r'nosetestspy3-(\d+)-', f.rsplit('/', 1)[-1])
+                  if m:
+                      seen.add(int(m.group(1)))
+              missing = sorted(set(range(14)) - seen)
+              if missing:
+                  sys.exit(side + ': missing result XML for slices '
+                           + str(missing) + ' - refusing to report from a partial run')
+              print(side + ': all 14 slices present')
+          EOF
 
       # twin of "Generate Reports": unchanged script, jinja templates from the
       # VM-local WMCore-Jenkins clone (Jenkins checks the same repo out into
