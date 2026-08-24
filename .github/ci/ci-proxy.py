@@ -13,6 +13,7 @@ import socketserver
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -71,6 +72,14 @@ class Handler(socketserver.StreamRequestHandler):
             upstream.close()
 
     def plain_http(self, method, target, headers):
+        # Only proxy real web egress. build_opener() also registers urllib's
+        # default file://, ftp:// and data:// handlers, so a container could
+        # ask this host-side proxy to read a local file (e.g. the mounted grid
+        # key). Refuse any non-web scheme before it reaches the opener.
+        if urllib.parse.urlsplit(target).scheme.lower() not in ('http', 'https'):
+            self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n'
+                             b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+            return
         req = urllib.request.Request(target, method=method)
         for raw in headers:
             try:
