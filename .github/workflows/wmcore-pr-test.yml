@@ -120,6 +120,11 @@ jobs:
   # the third status on real dmwm PRs comes from. Script and interpreter live
   # on the runner VM (Jenkins also runs it on the agent, not in a container).
   begin:
+    # Never run the credentialed jobs for a pull request opened from another
+    # fork: they execute untrusted PR code on the self-hosted runner, which
+    # mounts the grid cert and rucio account. Same-repo pull requests and
+    # workflow_dispatch still run. report needs: begin, so it skips with them.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
@@ -142,6 +147,8 @@ jobs:
   # stack 1 and the smallest is stack 3.
   unit-tests:
     needs: begin
+    # same guard as begin: no untrusted cross-fork PR code on this runner
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
     # ~13 min when everything passes; the head-room is for the retry(5) loops
     timeout-minutes: 90
