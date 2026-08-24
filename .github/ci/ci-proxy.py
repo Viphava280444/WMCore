@@ -12,7 +12,22 @@ import socket
 import socketserver
 import sys
 import threading
+import urllib.error
+import urllib.parse
 import urllib.request
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A proxy must relay 3xx to the client, not follow it: following an
+    http->https redirect here would strip the client's own credentials
+    (grid certificate) from the https hop. The client follows the Location
+    itself and reaches https through the CONNECT tunnel with its cert."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(NoRedirect)
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -57,6 +72,14 @@ class Handler(socketserver.StreamRequestHandler):
             upstream.close()
 
     def plain_http(self, method, target, headers):
+        # Only proxy real web egress. build_opener() also registers urllib's
+        # default file://, ftp:// and data:// handlers, so a container could
+        # ask this host-side proxy to read a local file (e.g. the mounted grid
+        # key). Refuse any non-web scheme before it reaches the opener.
+        if urllib.parse.urlsplit(target).scheme.lower() not in ('http', 'https'):
+            self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n'
+                             b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+            return
         req = urllib.request.Request(target, method=method)
         for raw in headers:
             try:
@@ -65,9 +88,25 @@ class Handler(socketserver.StreamRequestHandler):
                     req.add_header(name.strip(), value.strip())
             except ValueError:
                 continue
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        try:
+            resp = OPENER.open(req, timeout=60)
+        except urllib.error.HTTPError as httperr:
+            # a 3xx/4xx/5xx is a valid HTTP response the client must see:
+            # tests like Requests_t:test404Error assert on the status code,
+            # and swallowing it here turned into (52, 'Empty reply from
+            # server'); 3xx additionally needs its Location header relayed
+            resp = httperr
+        with resp:
             body = resp.read()
-            self.wfile.write(f'HTTP/1.1 {resp.status} OK\r\n'.encode('latin-1'))
+            status = getattr(resp, 'status', None) or resp.code
+            reason = getattr(resp, 'reason', '') or 'OK'
+            self.wfile.write(f'HTTP/1.1 {status} {reason}\r\n'.encode('latin-1'))
+            for name, value in resp.headers.items():
+                if name.lower() in ('connection', 'keep-alive', 'proxy-connection',
+                                    'proxy-authenticate', 'transfer-encoding',
+                                    'content-length', 'upgrade'):
+                    continue
+                self.wfile.write(f'{name}: {value}\r\n'.encode('latin-1'))
             self.wfile.write(f'Content-Length: {len(body)}\r\nConnection: close\r\n\r\n'.encode('latin-1'))
             self.wfile.write(body)
 
