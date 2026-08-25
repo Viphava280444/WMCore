@@ -610,10 +610,10 @@ jobs:
             || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
           sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
           # Delta-aware pylint gate (fail only on NEW W/E). The patcher comes
-          # from the unit-tests job's checkout: jobs share this runner's
-          # persistent workspace. It exits 1 on upstream drift, keeping the
-          # same loud-guard contract as the grep above.
-          python3 "$GITHUB_WORKSPACE/.github/ci/patch-pylint-delta.py" \
+          # from the unit-tests job's checkout (path: wmcore-src): jobs share
+          # this runner's persistent workspace. It exits 1 on upstream drift,
+          # keeping the same loud-guard contract as the grep above.
+          python3 "$GITHUB_WORKSPACE/wmcore-src/.github/ci/patch-pylint-delta.py" \
             "$RUNNER_TEMP/PullRequestReport.py"
           # tee the output: the run-summary step reads the printed
           # "Python3 Unit Test summary {...}" dict instead of recomputing the
