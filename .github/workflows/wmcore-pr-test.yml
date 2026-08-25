@@ -590,9 +590,10 @@ jobs:
       # twin of "Generate Reports": jinja templates from the VM-local
       # WMCore-Jenkins clone (Jenkins checks the same repo out into its
       # workspace). Posts the comment + the two named commit statuses.
-      # The script logic is unchanged; only the comment's opening words are
-      # patched at runtime, because the runs come from GitHub Actions now,
-      # not Jenkins.
+      # Two fork-only patches are applied to a throwaway copy at runtime:
+      # the comment's opening words (the runs come from GitHub Actions now,
+      # not Jenkins), and the pylint gate made delta-aware (fail only on NEW
+      # W/E events - see .github/ci/patch-pylint-delta.py for the rationale).
       - name: Generate report and update PR (PullRequestReport.py)
         env:
           DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -608,6 +609,12 @@ jobs:
           grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
             || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
           sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
+          # Delta-aware pylint gate (fail only on NEW W/E). The patcher comes
+          # from the unit-tests job's checkout: jobs share this runner's
+          # persistent workspace. It exits 1 on upstream drift, keeping the
+          # same loud-guard contract as the grep above.
+          python3 "$GITHUB_WORKSPACE/.github/ci/patch-pylint-delta.py" \
+            "$RUNNER_TEMP/PullRequestReport.py"
           # tee the output: the run-summary step reads the printed
           # "Python3 Unit Test summary {...}" dict instead of recomputing the
           # gate itself (two implementations of the gate would eventually
