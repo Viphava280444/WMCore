@@ -1,0 +1,372 @@
+# WMCore PR report: posts the "GitHub Actions results:" comment and the commit
+# statuses for a completed "WMCore PR tests" run. Jenkins twin: WMCore-PR-Report.
+#
+# Why a separate workflow: a test run started by a fork pull_request holds a
+# read-only token and cannot post anything. This workflow is triggered by the
+# base repo itself (workflow_run), so it always gets a write token - fork PRs
+# included. That makes "approve the run, results arrive by themselves" work.
+# NOTE: workflow_run only fires once this file is on the default branch.
+#
+# Security contract: this workflow never checks out or executes PR code. It
+# only PARSES the test run's artifacts (XML and JSON). The pr-context artifact
+# is data, not trusted: the PR number must be plain digits, and for a
+# pull_request-triggered test run it must name the PR whose head SHA equals
+# the SHA that run tested - otherwise this workflow refuses to post.
+
+name: WMCore PR report
+
+on:
+  workflow_run:
+    workflows: ["WMCore PR tests"]
+    types: [completed]
+  # manual door: testing, or re-posting a report for a finished test run
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run id of a completed "WMCore PR tests" run'
+        required: true
+      pr_number:
+        description: 'PR number that run tested'
+        required: true
+
+permissions:
+  contents: read
+  statuses: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+env:
+  ghprbTargetBranch: master
+  BUILD_ID: ${{ github.run_id }}
+  # the PR comment links here; the pr-report artifact is uploaded to THIS run,
+  # and the trailing '#' keeps the path the script appends a harmless fragment
+  BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
+  # VM-local clone of the private dmwm/WMCore-Jenkins
+  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
+
+jobs:
+  report:
+    # cancelled test runs have nothing to report; success AND failure do
+    # (like Jenkins, the report posts even when tests failed)
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+    steps:
+      # Which test run, which PR. On dispatch both come from the inputs. On
+      # workflow_run the PR number comes from the test run's pr-context
+      # artifact (the event payload omits fork PRs), validated as described in
+      # the header. A test run whose jobs were all guard-skipped uploaded no
+      # artifact - then there is nothing to report and every later step skips.
+      - name: Resolve which test run to report on
+        id: ctx
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # inputs go through env, never inline in the script (injection guard)
+          RUN_ID_IN: ${{ inputs.run_id }}
+          PR_IN: ${{ inputs.pr_number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            test_run_id="$RUN_ID_IN"
+            pr="$PR_IN"
+          else
+            test_run_id='${{ github.event.workflow_run.id }}'
+            rm -rf pr-context pr-context.zip
+            art_url=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}/artifacts?per_page=100" \
+              | python3 -c 'import json,sys; m=[a for a in json.load(sys.stdin)["artifacts"] if a["name"]=="pr-context"]; print(m[0]["archive_download_url"] if m else "")')
+            if [ -z "$art_url" ]; then
+              echo "No pr-context artifact on run ${test_run_id} (guard-skipped or pre-split run) - nothing to report"
+              echo "should=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            curl -sfL -H "Authorization: Bearer $GH_TOKEN" -o pr-context.zip "$art_url"
+            python3 -c 'import zipfile; zipfile.ZipFile("pr-context.zip").extractall("pr-context")'
+            pr=$(tr -d '[:space:]' < pr-context/pr-number.txt)
+          fi
+          case "$test_run_id" in ''|*[!0-9]*) echo "run id is not a number ('$test_run_id')"; exit 1;; esac
+          case "$pr" in ''|*[!0-9]*) echo "pr-context is not a plain number ('$pr') - refusing"; exit 1;; esac
+          head_sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${pr}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] && [ "${{ github.event.workflow_run.event }}" = "pull_request" ]; then
+            if [ "$head_sha" != "${{ github.event.workflow_run.head_sha }}" ]; then
+              echo "pr-context names PR ${pr} (head ${head_sha}) but the test run tested ${{ github.event.workflow_run.head_sha }}."
+              echo "Either tampering or a push landed between test and report - refusing to post."
+              exit 1
+            fi
+          fi
+          echo "ghprbPullId=${pr}" >> "$GITHUB_ENV"
+          echo "PR_HEAD_SHA=${head_sha}" >> "$GITHUB_ENV"
+          echo "should=true" >> "$GITHUB_OUTPUT"
+          echo "test-run-id=${test_run_id}" >> "$GITHUB_OUTPUT"
+          echo "Reporting on test run ${test_run_id} for PR ${pr} (head ${head_sha})"
+
+      # The workspace persists between runs on this runner, so stale results
+      # MUST be removed before the downloads (file names embed run ids).
+      # UnstableTests.txt is read from this fork's master; KnownFailures.txt
+      # PR-head first, so a PR that fixes a known failure explains itself.
+      - name: Set up report environment
+        if: steps.ctx.outputs.should == 'true'
+        run: |
+          rm -rf report-venv LatestUnitTests LatestPylint MasterUnitTests artifacts UnstableTests.txt KnownFailures.txt report-stdout.txt
+          python3 -m venv report-venv
+          report-venv/bin/pip -q install jinja2 xunitparser PyGithub
+          curl -sf -o UnstableTests.txt \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/test/etc/UnstableTests.txt"
+          curl -sf -o KnownFailures.txt \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${PR_HEAD_SHA:-master}/test/etc/KnownFailures.txt" \
+            || curl -sf -o KnownFailures.txt \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/test/etc/KnownFailures.txt" \
+            || echo "no KnownFailures.txt available - every failing test will list as unexplained"
+          mkdir -p artifacts
+
+      # these two tolerate missing artifacts: PullRequestReport.py skips report
+      # sections it has no input for. The baseline fetch below stays strict.
+      - name: Fetch PR test results (LatestUnitTests)
+        if: steps.ctx.outputs.should == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nosetests-slice-*
+          path: LatestUnitTests
+          run-id: ${{ steps.ctx.outputs.test-run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch lint results (LatestPylint)
+        if: steps.ctx.outputs.should == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: lint-reports
+          path: LatestPylint
+          run-id: ${{ steps.ctx.outputs.test-run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Jenkins: copyArtifacts projectName 'WMCore-Unittest-Baseline',
+      # selector lastSuccessful()
+      - name: Find latest successful baseline run
+        if: steps.ctx.outputs.should == 'true'
+        id: baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          run_id=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/wmcore-baseline.yml/runs?status=success&per_page=1" \
+            | python3 -c 'import json,sys; runs=json.load(sys.stdin)["workflow_runs"]; print(runs[0]["id"] if runs else "")')
+          if [ -z "$run_id" ]; then
+            echo "No successful baseline run found. Run the 'WMCore baseline' workflow first" \
+                 "(Jenkins equivalent: WMCore-Unittest-Baseline lastSuccessful)." >&2
+            exit 1
+          fi
+          echo "Using baseline from run $run_id"
+          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch baseline results (MasterUnitTests)
+        if: steps.ctx.outputs.should == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nosetests-slice-*
+          path: MasterUnitTests
+          run-id: ${{ steps.baseline.outputs.run-id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # A partial run must never reach PullRequestReport.py: with slices
+      # missing, vanished tests count as 'deleted' and it posts green statuses
+      # from the wreckage. Fail here instead.
+      - name: Require complete results (all 14 slices, both sides)
+        if: steps.ctx.outputs.should == 'true'
+        run: |
+          python3 - <<'EOF'
+          import glob, re, sys
+          for side in ('LatestUnitTests', 'MasterUnitTests'):
+              seen = set()
+              for f in glob.glob(side + '/*/nosetestspy3-*.xml'):
+                  m = re.search(r'nosetestspy3-(\d+)-', f.rsplit('/', 1)[-1])
+                  if m:
+                      seen.add(int(m.group(1)))
+              missing = sorted(set(range(14)) - seen)
+              if missing:
+                  sys.exit(side + ': missing result XML for slices '
+                           + str(missing) + ' - refusing to report from a partial run')
+              print(side + ': all 14 slices present')
+          EOF
+
+      # twin of "Generate Reports": jinja templates from the VM-local
+      # WMCore-Jenkins clone. Posts the comment + the two named commit statuses.
+      # Two fork-only patches go to a throwaway copy at runtime: the comment's
+      # opening words, and a delta-aware pylint gate (fail only on NEW W/E).
+      - name: Generate report and update PR (PullRequestReport.py)
+        if: steps.ctx.outputs.should == 'true'
+        env:
+          DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WMCORE_REPO: ${{ github.repository_owner }}
+          CODE_REPO: WMCore
+          JENKINS_JINJA_TEMPLATE_PATH: ${{ env.WMCORE_JENKINS_HOST_DIR }}/templates
+        run: |
+          # Fork-only wording change. The VM clone is read-only, so patch a
+          # throwaway copy. The grep fails loudly if upstream text drifts.
+          cp "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestReport.py" \
+             "$RUNNER_TEMP/PullRequestReport.py"
+          grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
+            || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
+          sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
+          # Delta-aware pylint gate (fail only on NEW W/E). The patcher lives in
+          # this repo; fetch the master copy, since this workflow checks out no
+          # code. It exits 1 on upstream drift.
+          curl -sf -o "$RUNNER_TEMP/patch-pylint-delta.py" \
+            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/.github/ci/patch-pylint-delta.py"
+          python3 "$RUNNER_TEMP/patch-pylint-delta.py" "$RUNNER_TEMP/PullRequestReport.py"
+          # tee the output: the run-summary step reads the printed
+          # "Python3 Unit Test summary {...}" dict instead of recomputing the
+          # gate - two gates would disagree. pipefail keeps a crash fatal.
+          set -o pipefail
+          report-venv/bin/python "$RUNNER_TEMP/PullRequestReport.py" 2>&1 | tee report-stdout.txt
+
+      - name: Upload PR report
+        if: always() && steps.ctx.outputs.should == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-report
+          path: artifacts/PullRequestReport.html
+          if-no-files-found: warn
+
+      # twin of the ghprb plugin: it flips the "default" status, set to pending
+      # by the begin job (absent on fork PRs - then this creates it), to the
+      # outcome of this report job.
+      - name: Finish default status (report job outcome)
+        if: always() && steps.ctx.outputs.should == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          state=failure
+          [ "${{ job.status }}" = "success" ] && state=success
+          # --retry: without it a transient 5xx after the server committed the
+          # write turns the whole run red although the status was posted
+          curl -sf --retry 3 --retry-all-errors -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
+            -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
+
+      # Operator-readable summary. Three rules keep it honest:
+      # 1. The verdict is NEVER recomputed here - it quotes the summary dict
+      #    PullRequestReport.py printed (report-stdout.txt).
+      # 2. KnownFailures.txt only explains failures; it has no vote in the gate.
+      # 3. A failure in neither manifest shows as a loud UNEXPLAINED section.
+      # Globs ONLY LatestUnitTests: MasterUnitTests holds baseline XMLs with the
+      # same file-name shape, and counting them would double every number.
+      - name: Write run summary
+        if: always() && steps.ctx.outputs.should == 'true'
+        run: |
+          python3 - <<'EOF' || echo "::warning::run-summary rendering failed; statuses and PR comment are unaffected"
+          import ast, glob, os, re
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+
+          def load_manifest(path):
+              fams, known, kskips, section = {}, {}, {}, None
+              if os.path.exists(path):
+                  for raw in open(path, encoding='utf-8'):
+                      line = raw.strip()
+                      if not line or line.startswith('#'):
+                          continue
+                      if line in ('[families]', '[tests]', '[skips]'):
+                          section = line
+                          continue
+                      parts = [p.strip() for p in line.split('|')]
+                      if section == '[families]' and len(parts) >= 4:
+                          fams[parts[0]] = {'reason': parts[2], 'fixpath': parts[3]}
+                      elif section == '[tests]' and len(parts) >= 2:
+                          known[parts[0]] = parts[1]
+                      elif section == '[skips]' and len(parts) >= 2:
+                          kskips[parts[0]] = parts[1]
+              return fams, known, kskips
+
+          tests = failures = errors = skipped = badfiles = 0
+          failing = {}
+          for f in glob.glob('LatestUnitTests/**/nosetests*.xml', recursive=True):
+              try:
+                  root = ET.parse(f).getroot()
+              except Exception:
+                  badfiles += 1
+                  continue
+              suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')
+              for s in suites:
+                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
+                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
+              for tc in root.iter('testcase'):
+                  for b in list(tc):
+                      if b.tag in ('error', 'failure'):
+                          failing[tc.get('classname', '?') + ':' + tc.get('name', '?')] = b.tag
+
+          gate = None
+          try:
+              stdout = open('report-stdout.txt', encoding='utf-8', errors='replace').read()
+              m = re.search(r'Python3 Unit Test summary (\{.*\})', stdout)
+              if m:
+                  gate = ast.literal_eval(m.group(1))
+          except Exception:
+              pass
+
+          fams, known, _kskips = load_manifest('KnownFailures.txt')
+          unstable = set()
+          try:
+              unstable = {l.strip() for l in open('UnstableTests.txt')
+                          if l.strip() and not l.startswith('#')}
+          except OSError:
+              pass
+
+          by_family, unexplained = {}, []
+          for tid in sorted(failing):
+              if tid in known:
+                  by_family.setdefault(known[tid], []).append(tid)
+              elif tid in unstable:
+                  by_family.setdefault('(unstable list)', []).append(tid)
+              else:
+                  unexplained.append(tid)
+
+          L = ['## WMCore PR test results', '']
+          if gate is not None:
+              nf = gate.get('newFailures')
+              if nf == 0:
+                  L.append('**Gate verdict: PASS - 0 new failures.** This PR breaks nothing '
+                           'that master does not already have. Report counters: `%s`' % gate)
+              else:
+                  L.append('**Gate verdict: %s new failure(s).** The report flagged tests that '
+                           'pass on the master baseline but fail in this run - see the PR '
+                           'comment and the pr-report artifact. Report counters: `%s`' % (nf, gate))
+          else:
+              L.append('**Gate verdict unavailable** - the report step did not print its '
+                       'summary dict (see the "Generate report" step log). The commit '
+                       'statuses are the authority.')
+          L += ['', '| Tests | Failures | Errors | Skipped |', '|---|---|---|---|',
+                '| %d | %d | %d | %d |' % (tests, failures, errors, skipped), '',
+                'The %d failing tests do NOT block this PR: the gate compares against '
+                'master, and these fail the same way there. Each one is tracked in '
+                '`test/etc/KnownFailures.txt` with its cause and fix path.' % (failures + errors), '']
+          if by_family:
+              L += ['| Known-failure family | Today | Cause | Fix path |', '|---|---|---|---|']
+              for fam in sorted(by_family, key=lambda k: -len(by_family[k])):
+                  meta = fams.get(fam, {})
+                  L.append('| %s | %d | %s | %s |' % (
+                      fam, len(by_family[fam]),
+                      meta.get('reason', 'flip-prone; forgiven via UnstableTests.txt'),
+                      meta.get('fixpath', 'test/etc/UnstableTests.txt')))
+              L.append('')
+          if unexplained:
+              L += ['### :warning: %d UNEXPLAINED failing test(s) - investigate' % len(unexplained),
+                    'These match neither KnownFailures.txt nor UnstableTests.txt. '
+                    'They are the real signal on this page:', '']
+              L += ['- `%s` (%s)' % (t, failing[t]) for t in unexplained]
+              L.append('')
+          else:
+              L += ['No unexplained failures: every failing test above is a documented known failure.', '']
+          if badfiles:
+              L.append(':warning: %d result XML file(s) could not be parsed; counts above exclude them.' % badfiles)
+          if os.path.exists('LatestPylint/pep8py3.txt'):
+              n = sum(1 for _ in open('LatestPylint/pep8py3.txt'))
+              L.append('pycodestyle: %d comments to review (informational, non-blocking)' % n)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(L) + '\n')
+          EOF
