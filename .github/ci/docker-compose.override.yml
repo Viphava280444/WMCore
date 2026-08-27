@@ -1,26 +1,14 @@
-# Fork-runner override, used together with the vendored docker-compose.yml.
+# Fork-runner override, used with the vendored docker-compose.yml.
 #
-# dmwm/WMCore-Jenkins is a private repository, so the image entrypoint cannot
-# clone it at container start (it does: git clone .../WMCore-Jenkins, then
-# cp -r WMCore-Jenkins/{TestScripts,ContainerScripts} into /home/cmsbld).
-# Instead, a clone kept on the runner VM is mounted read-only at the same
-# place; the entrypoint's failed clone is harmless and its cp -r then copies
-# the scripts from the mount. Private code never leaves the CERN VM.
+# WMCore-Jenkins is private, so the entrypoint's clone fails at container
+# start. A clone on the runner VM is mounted read-only at the same path
+# instead; the failed clone is harmless. Not needed upstream.
 #
-# Not needed upstream: dmwm runners can clone the repo directly.
-#
-# Parallel stacks: N test stacks coexist on one VM. The vendored compose uses
-# host networking (the DBs bind host 3306/5984, so a second stack collides).
-# Here each stack gets a PRIVATE network namespace: mariadb owns it (bridge)
-# and couchdb + the test container JOIN it (network_mode service:mariadb), so
-# the test script's hardcoded 127.0.0.1/localhost still reaches its OWN
-# databases, isolated per stack. Same-target volume entries replace the
-# vendored ones, giving each stack its own /tmp (the mariadb socket lives
-# there) and its own RAM data dir. Container names carry the compose project
-# name, which also ends the "couchdb"/"mariadb" global name squatting.
-# Per-stack knobs (all defaulted, so a single-stack run needs none):
-#   COMPOSE_PROJECT_NAME, HOST_MOUNT_DIR, WMCI_MDB_DATA_DIR, WMCI_NET,
-#   WMCI_PROXY, WMCI_CI_DIR
+# Parallel stacks: each stack gets its own network namespace (mariadb owns
+# it, couchdb and the test container join it) so DBs on multiple stacks
+# don't collide. Same-target volumes give each stack its own /tmp and RAM
+# data dir. Per-stack env (all optional): COMPOSE_PROJECT_NAME,
+# HOST_MOUNT_DIR, WMCI_MDB_DATA_DIR, WMCI_NET, WMCI_PROXY, WMCI_CI_DIR
 
 # the generated passwd/group (setup-users.sh) replace the host files by
 # mount target, so containers can resolve the sssd runner account
@@ -37,10 +25,9 @@ x-stack-test: &stack-test
   depends_on:
     - mariadb
     - egress-shim
-  # docker on this VM programs no NAT (iptables:false), so bridge containers
-  # have no direct egress; a small proxy on the HOST provides it. Set at
-  # container level so the image entrypoint's git clone works too. DB
-  # traffic (localhost) stays direct via no_proxy.
+  # Bridge containers have no direct egress here, so a proxy on the HOST
+  # provides it. Set at container level so the entrypoint's git clone
+  # works too. DB traffic (localhost) stays direct via no_proxy.
   environment:
     http_proxy: ${WMCI_PROXY:-}
     https_proxy: ${WMCI_PROXY:-}
@@ -55,21 +42,18 @@ x-stack-test: &stack-test
     - "${HOST_MOUNT_DIR}/tmp:/tmp"
 
 services:
-  # MariaDB data on a RAM disk: the tests recreate and wipe the database after
-  # every test, which is sync-write-bound on the VM's virtio disk (measured:
-  # 45+ min per slice vs Jenkins' 30-min budget). The long-form mount below
-  # has the same target as the bind in the vendored file, so it replaces it.
-  # The database is throwaway per run - losing it on stop is the point.
+  # MariaDB data on a RAM disk: tests recreate and wipe the DB every run,
+  # which is too slow on real disk. The mount below has the same target as
+  # the vendored bind, so it replaces it. Losing the DB on stop is fine -
+  # it's throwaway per run.
   mariadb:
     # the vendored file pins network_mode host; !reset removes that key so
     # the custom network below can take effect (conflicting keys otherwise)
     network_mode: !reset null
-    # A custom network, not the default bridge: this VM's docker daemon has
-    # ip masquerade DISABLED on the default bridge (container egress dies) and
-    # the host resolver is a loopback stub (127.0.0.53) that the default
-    # bridge cannot use. A per-project network re-enables masquerade and gets
-    # Docker's embedded DNS; explicit dns: entries are the CERN resolvers as
-    # a fallback (from /run/systemd/resolve/resolv.conf on vocms047).
+    # Custom network, not the default bridge: this VM's default bridge has
+    # ip masquerade disabled (no egress) and can't reach the host's loopback
+    # DNS stub. A per-project network re-enables masquerade and gets
+    # Docker's DNS; the dns: entries below are a fallback.
     networks:
       - stacknet
     dns:
@@ -94,10 +78,9 @@ services:
       - "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
       - "${HOST_MOUNT_DIR}/tmp:/tmp"
 
-  # firewall-free egress: the VM's nftables drops all container<->host IP
-  # traffic, so this sidecar (same netns as the stack) listens on
-  # 127.0.0.1:3128 and pipes into a bind-mounted unix socket served by
-  # ci-proxy.py on the host - a filesystem path netfilter never sees
+  # Firewall-free egress: the VM blocks container<->host IP traffic, so
+  # this sidecar listens on 127.0.0.1:3128 and pipes to a unix socket
+  # served on the host - a filesystem path the firewall never sees.
   egress-shim:
     image: registry.cern.ch/cmsweb/wmcore-dev:${WMCORE_DEV_TAG}
     user: ${MY_ID}:${MY_GROUP}

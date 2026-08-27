@@ -1,62 +1,19 @@
-# WMCore PR tests, migrated from Jenkins.
+# WMCore PR tests, migrated from Jenkins. Mirrors dmwm/WMCore-Jenkins.
+# Jenkins stage -> job:
+#   PullRequestTestBegin.py        -> begin
+#   WMCore-PR-test 12-slice matrix -> unit-tests
+#   WMCore-PR-pylint               -> lint container inside unit-tests
+#   PullRequestReport.py           -> report
+#   ghprb "default" build status   -> last step of report
+# Same images, tags, test command, slice split and 5 retries. The compose file
+# is a vendored copy; the test, lint and report scripts run unchanged.
 #
-# This mirrors dmwm/WMCore-Jenkins (WMCore-PR-Report/Jenkinsfile as the
-# orchestrator, plus WMCore-PR-test and WMCore-PR-pylint) as closely as
-# possible. Jenkins stage -> job mapping:
-#   - "Update GitHub PR status" (PullRequestTestBegin.py)  -> job "begin"
-#   - WMCore-PR-test 12-slice matrix                       -> job "unit-tests"
-#   - WMCore-PR-pylint                    -> lint container inside "unit-tests"
-#   - "Copy artifacts" + "Generate Reports"
-#     (PullRequestReport.py)                               -> job "report"
-#   - ghprb plugin's final build status ("default")        -> last step of "report"
-#   - same images and tags (wmcore-dev, MariaDB, CouchDB)
-#   - the docker-compose file is a verbatim vendored copy of
-#     WMCore-Test-Base/docker-compose.yml at commit b203d873 (that repo is
-#     private, so CI cannot fetch it); the test, lint, and report scripts run
-#     UNCHANGED (tests/lint inside the wmcore-dev image; report scripts from
-#     the VM-local WMCore-Jenkins clone, like Jenkins runs them on the agent)
-#   - same test command, same slice split, same 5 retries per slice
-#
-# Differences, on purpose (fork testing phase):
-#   - runs on the fork's self-hosted runner; instead of one slice per job run
-#     serially, ONE job runs three isolated test stacks in parallel on the VM
-#     (32 cores sat idle while a single stack worked). Each stack is a full
-#     mariadb+couchdb+test container set in its own network namespace, own
-#     workspace, own RAM data dir and own /tmp (see .github/ci/*), and
-#     executes a runtime-balanced share of the 14 slice invocations.
-#     Measured at 3 stacks (run 32193701287): 1653 tests, 905 s stacks step,
-#     19m17s wall vs ~55 min serial. A 4th stack was measured (runs
-#     32271364956, 32273362962) to save ~60 s but make tests that start a
-#     fixed-port local server (127.0.0.1:8888/9988) fail under the extra
-#     load, in both runs - do not add it back before those tests get a
-#     wait-for-listen loop.
-#   - the lint container runs beside the stacks in the same job, and the run
-#     summary is a step of the report job: the runner executes one job at a
-#     time, and a job that is queued while the runner is busy pays ~52 s of
-#     pickup latency (measured on 26 job boundaries), so fewer jobs = less
-#     dead time. The authoritative Py3 Pylint verdict still comes from
-#     PullRequestReport.py in the report job.
-#   - the stacks reach the internet through a per-stack host proxy
-#     (.github/ci/ci-proxy.py + ci-shim.py): the VM's docker programs no NAT
-#     and its nftables drops container<->host IP traffic, so egress goes
-#     through a bind-mounted unix socket instead
-#   - dummy secrets and a self-signed cert (.github/ci/setup-env-gha.sh);
-#     the fork stores no secrets at all
-#   - DMWMBOT_TOKEN for the report scripts is the workflow's own GITHUB_TOKEN
-#     (comments and statuses appear from github-actions[bot], not dmwm-bot)
-#   - one step redirects git URLs from dmwm/WMCore to this fork, because the
-#     unchanged scripts hardcode dmwm/WMCore for fetching PR refs.
-#     Delete that step when this workflow moves upstream.
-#   - UnstableTests.txt comes from this fork's master (Jenkins curls it from
-#     dmwm master; same file)
-#   - BUILD_URL ends with '#': PullRequestReport.py appends the Jenkins
-#     artifact path to it, and the '#' keeps that as a harmless URL fragment,
-#     so links land on the Actions run page (the report html is an artifact)
-#   - Jenkins skips the report when the pylint BUILD infra-fails (its trigger
-#     has no propagate:false); here the report still runs and reports the
-#     sections it has artifacts for
-#   - images are kept in the local docker cache between runs (Jenkins wiped
-#     them with --rmi all on every cell)
+# Fork differences, on purpose:
+#   - one job runs three isolated test stacks in parallel on the self-hosted runner
+#   - lint runs beside the stacks; the run summary is a step of the report job
+#   - stacks reach the internet through a per-stack host proxy on a unix socket
+#   - dummy secrets and a self-signed cert; DMWMBOT_TOKEN is the own GITHUB_TOKEN
+#   - git URLs redirect dmwm/WMCore -> this fork. DELETE when moving upstream.
 
 name: WMCore PR tests
 
@@ -69,21 +26,14 @@ on:
         description: 'PR number to test'
         required: true
 
-# Two levels, on purpose:
-#  - here, per PR: a new push to the same PR cancels the running tests, as
-#    before (the slice matrix is gone, but the semantics are unchanged).
-#  - on the unit-tests job: group "vocms047-tests", shared with the baseline
-#    workflow. The three stacks use the whole VM, so a PR test run and a
-#    baseline run must not overlap; queued, never cancelled, so no run is
-#    thrown away. Keeping that group off the workflow level is deliberate:
-#    at workflow level it would serialize (and, with cancel-in-progress,
-#    cancel) unrelated PRs against each other.
+# Two levels: here, per PR, a new push cancels the running tests. The unit-tests
+# job also joins group "vocms047-tests" so a PR run and a baseline run never
+# overlap. Do not move that group here: it would serialize unrelated PRs.
 concurrency:
   group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
 
-# what the unchanged report scripts need: statuses (PullRequestTestBegin.py,
-# PullRequestReport.py, ghprb twin), the PR comment (issues API), and reading
+# what the unchanged report scripts need: statuses, the PR comment, and reading
 # baseline artifacts from another workflow's run
 permissions:
   contents: read
@@ -99,13 +49,14 @@ env:
   MDB_TAG: '10.6.19'
   TEST_SERVICE: 'wmcore-pr-test'
   SLICES: '12'
-  # Jenkins job parameter; current -stable tag on registry.cern.ch/cmsweb/wmcore-dev
+  # Jenkins job parameter; -stable tag on registry.cern.ch/cmsweb/wmcore-dev
   WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
   # Jenkins ghprb plugin equivalents
   ghprbPullId: ${{ github.event.pull_request.number || inputs.pr_number }}
   ghprbTargetBranch: ${{ github.base_ref || 'master' }}
   BUILD_ID: ${{ github.run_id }}
-  # Jenkins BUILD_URL equivalent; the trailing '#' is explained in the header
+  # Jenkins BUILD_URL; the report script appends a path, and the trailing '#'
+  # keeps that a harmless URL fragment
   BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
   DMWMBOT_TOKEN: ''
   WMCORE_JENKINS_ORG: dmwm
@@ -114,16 +65,12 @@ env:
   WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
 
 jobs:
-  # fork twin of WMCore-PR-Report stage "Update GitHub PR status": the
-  # unchanged PullRequestTestBegin.py posts a 'pending' commit status. It
-  # passes no context, so GitHub names the status "default" - that is where
-  # the third status on real dmwm PRs comes from. Script and interpreter live
-  # on the runner VM (Jenkins also runs it on the agent, not in a container).
+  # fork twin of the Jenkins "Update GitHub PR status" stage: the unchanged
+  # PullRequestTestBegin.py posts a 'pending' commit status. It passes no
+  # context, so GitHub names the status "default". It runs on the runner VM.
   begin:
-    # Never run the credentialed jobs for a pull request opened from another
-    # fork: they execute untrusted PR code on the self-hosted runner, which
-    # mounts the grid cert and rucio account. Same-repo pull requests and
-    # workflow_dispatch still run. report needs: begin, so it skips with them.
+    # Never run for a pull request opened from another fork: it would run
+    # untrusted code on a runner that mounts the grid cert and rucio account.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
@@ -140,17 +87,14 @@ jobs:
             "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestTestBegin.py"
 
   # fork twin of the WMCore-PR-test 12-cell matrix, run as THREE isolated
-  # stacks in parallel inside one job (see the header). The slice groups are
-  # the optimal 3-way split of the per-slice times measured in run
-  # 32193701287, shifted for the WMCORE_TEST_EXIT_ALARM=10 exit fix. The
-  # start stagger delays stack K by (K-1)*20 s, so the largest group is
-  # stack 1 and the smallest is stack 3.
+  # stacks in parallel inside one job. The slice groups are a runtime-balanced
+  # 3-way split: stack 1 has the largest group, stack 3 the smallest.
   unit-tests:
     needs: begin
     # same guard as begin: no untrusted cross-fork PR code on this runner
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
-    # ~13 min when everything passes; the head-room is for the retry(5) loops
+    # the head-room is for the retry(5) loops
     timeout-minutes: 90
     # the three stacks use the whole VM: never at the same time as a baseline
     # run (same group there), and never cancelled halfway
@@ -183,14 +127,10 @@ jobs:
         run: |
           # the vendored compose file pins daemon-global container_names, so a
           # foreign container holding "couchdb"/"mariadb" blocks every run
-          # (2026-08-04..18 outage); the override renames them per stack, but
-          # containers left by an older revision of this workflow can still
-          # squat the bare names
           docker rm -f couchdb mariadb 2>/dev/null || true
-          # stale stacks from a killed/cancelled run of this job. A stale
-          # ci-stack-K directory is worse than a stale container: its old
-          # XMLs would be collected as THIS run's results, so the rm -rf
-          # below must always cover every stack index ever used.
+          # A stale ci-stack-K directory is worse than a stale container: its
+          # old XMLs would count as THIS run's results. The rm -rf below must
+          # always cover every stack index ever used.
           for k in 1 2 3 4; do
             docker rm -f "wmci${k}-mariadb" "wmci${k}-couchdb" 2>/dev/null || true
             ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
@@ -215,11 +155,9 @@ jobs:
           docker compose pull --quiet mariadb couchdb "$TEST_SERVICE" || true
           rm -rf "$WMCI_MDB_DATA_DIR"
 
-      # Each stack: own compose project, own workspace, own RAM data dir, own
-      # /24 bridge subnet, own host egress proxy. Inside a stack the slices
-      # still run one after another, with the Jenkinsfile's retry(5).
-      # The lint container (host-networked, no databases, no egress proxy
-      # needed) runs beside the stacks as a fourth background process.
+      # Each stack: own compose project, workspace, RAM data dir, bridge subnet
+      # and host egress proxy. Inside a stack the slices run one after another,
+      # with the Jenkinsfile's retry(5). The lint container runs beside them.
       # This step never decides the job outcome - the integrity check below
       # does - so a teardown or lint hiccup cannot turn a complete run red.
       - name: Run 3 stacks and pylint in parallel
@@ -235,7 +173,7 @@ jobs:
           export WMCI_PROXY="http://127.0.0.1:3128"
           rc=0
           # stagger the starts: simultaneous container creations on this
-          # VM's docker daemon occasionally trip over each other
+          # VM's docker daemon trip over each other
           sleep $(( (K-1) * 20 ))
           bash wmcore-src/.github/ci/setup-env-gha.sh
           setsid nohup python3 "$WMCI_CI_DIR/ci-proxy.py" "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" > "$HOST_MOUNT_DIR/proxy.log" 2>&1 &
@@ -244,11 +182,9 @@ jobs:
           test -S "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" || { echo "[S$K] proxy socket missing"; exit 1; }
           docker compose down --remove-orphans || true
           docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
-          # compose already waits for couchdb (condition: service_healthy), but
-          # mariadb is only service_started and its init script provisions the
-          # wmagent database ~12-18 s after that. Poll for its completion
-          # marker instead of a fixed sleep 20; running a slice before the
-          # grants exist would bake DB errors into results that look valid.
+          # compose waits for couchdb but not for mariadb's init. Poll for the
+          # init marker: a slice run before the grants exist bakes DB errors
+          # into results that look valid.
           mdb=""
           for i in $(seq 1 150); do
             if docker compose logs mariadb 2>/dev/null | grep -q "Start sleeping"; then mdb=1; break; fi
@@ -261,30 +197,26 @@ jobs:
             sleep 2
           done
           [ -n "$ready" ] || { echo "[S$K] entrypoint setup failed"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
-          # the entrypoint copies TestScripts first and chowns the home tree
-          # afterwards; a slice started in that window dies on 'rucio.cfg:
-          # Permission denied' (run 32271364956: the first slice of all 4
-          # stacks lost an attempt to it). Wait for the chown as the test
-          # uid, but only warn on timeout - retry(5) absorbs a miss.
+          # the entrypoint chowns the home tree after copying TestScripts; a
+          # slice started in that window dies on 'Permission denied'. Wait for
+          # the chown, but only warn on timeout - retry(5) absorbs a miss.
           chowned=""
           for i in $(seq 1 60); do
             if docker compose exec -T -u "$MY_ID" "$TEST_SERVICE" test -w /home/cmsbld/etc; then chowned=1; break; fi
             sleep 2
           done
           [ -n "$chowned" ] || echo "[S$K] warning: /home/cmsbld/etc still not writable after 120s, continuing"
-          # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so
-          # make git resolve that URL to this fork (PR refs live here).
-          # DELETE this when the workflow moves upstream.
+          # Fork only: the unchanged scripts hardcode dmwm/WMCore, so make git
+          # resolve it to this fork. DELETE this when moving upstream.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
           # Hard-sync the image's cached clone to fork master BEFORE the
-          # unchanged script's `git pull origin master` (test-wmcorepy3.sh):
-          # once fork master moves past the clone's baked-in state that pull
-          # is a divergence and git refuses it, killing every slice
-          # (run 32395662435 attempt 2: 11/14 slices produced no XML).
+          # unchanged script's `git pull origin master`: once master moves past
+          # the baked-in state, that pull diverges and git refuses it, which
+          # kills every slice.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" bash -c '
@@ -312,19 +244,17 @@ jobs:
             echo "STACK$K slice=$S ok=$ok wall_seconds=$(( $(date +%s) - s0 ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
           done
           echo "STACK$K total_wall_seconds=$(( $(date +%s) - stack_start ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
-          # backgrounded: teardown (~20 s of SIGTERM grace) must not gate the
-          # step's wait; the Stop stacks step force-reaps whatever is left
+          # backgrounded: teardown must not gate the step's wait; the Stop
+          # stacks step force-reaps whatever is left
           (docker compose down || true) >/dev/null 2>&1 &
           kill "$(cat "$HOST_MOUNT_DIR/proxy.pid")" 2>/dev/null || true
           exit $rc
           RUNNER
           chmod +x stack-runner.sh
           # the lint twin of the old pylint job, as a background process. It
-          # starts at t=90s, after every stack's container-creation burst
-          # (staggers 0/20/40/60) and after Warm images, and hides completely
-          # inside the stacks' runtime. Own compose project + workspace; env
-          # stays inside this script (HOST_MOUNT_DIR in GITHUB_ENV would
-          # repoint the job-level docker compose calls).
+          # starts after every stack's container-creation burst. Own compose
+          # project and workspace; env stays inside this script, because
+          # HOST_MOUNT_DIR in GITHUB_ENV would repoint the job-level compose calls.
           cat > pylint-runner.sh <<'LINT'
           #!/bin/bash
           sleep 90
@@ -375,9 +305,8 @@ jobs:
         run: |
           rm -rf unit-test-xml
           mkdir -p unit-test-xml
-          # one flat directory, so the download in the report job produces
-          # LatestUnitTests/<artifact>/nosetestspy3-*.xml - the exact shape
-          # PullRequestReport.py globs ('*/nosetestspy3-*.xml')
+          # one flat directory, so the report job's download has the exact
+          # shape PullRequestReport.py globs ('*/nosetestspy3-*.xml')
           cp ci-stack-*/artifacts/nosetestspy3-*.xml unit-test-xml/ 2>/dev/null || true
           cat ci-stack-*/artifacts/stack-timing.txt > stack-timing.txt 2>/dev/null || true
           ls -l unit-test-xml
@@ -387,7 +316,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           # the name must keep matching the report job's nosetests-slice-*
-          # download pattern; one artifact now holds all slices
+          # download pattern
           name: nosetests-slice-all
           path: unit-test-xml/nosetestspy3-*.xml
           if-no-files-found: warn
@@ -405,8 +334,8 @@ jobs:
             pylint.log
           if-no-files-found: warn
 
-      # twin of the old pylint job's upload; the report job downloads this
-      # artifact by its exact name, so the name must stay "lint-reports"
+      # the report job downloads this artifact by its exact name, so the name
+      # must stay "lint-reports"
       - name: Upload lint results
         if: always()
         uses: actions/upload-artifact@v4
@@ -417,10 +346,9 @@ jobs:
             ci-workspace/artifacts/pep8py3.txt
           if-no-files-found: warn
 
-      # the job's verdict: every slice produced a parseable XML and the run
-      # counted a sane number of tests. Individual test failures are NOT a
-      # job failure - the report job compares them against the baseline and
-      # sets the commit statuses, exactly as Jenkins does.
+      # the job's verdict: every slice produced a parseable XML and the test
+      # count is sane. Failing tests do NOT fail this job - the report job
+      # compares them against the baseline and sets the commit statuses.
       - name: Check result integrity
         if: always()
         run: |
@@ -460,8 +388,8 @@ jobs:
               print('unparseable result files: %s' % ', '.join(bad))
           if missing:
               print('MISSING result XML for slices: %s' % ' '.join(missing))
-          # 1653 tests on the proven run; anything far below means slices
-          # died before writing results, however green the containers looked
+          # a far too low total means slices died before writing results,
+          # however green the containers looked
           if total < 1000:
               print('IMPLAUSIBLE total test count: %d' % total)
           sys.exit(1 if (bad or missing or total < 1000) else 0)
@@ -482,27 +410,22 @@ jobs:
           rm -rf "/dev/shm/wmci-mdb-$(id -u)-pl"
           docker ps
 
-  # fork twin of WMCore-PR-Report stages "Copy artifacts" + "Generate Reports".
-  # Jenkins runs the unchanged PullRequestReport.py on the agent in a venv;
-  # this job does the same on the runner VM. It compares this run's XMLs
-  # (LatestUnitTests) against the newest successful baseline run
-  # (MasterUnitTests, Jenkins: copyArtifacts lastSuccessful), then posts the
-  # "GitHub Actions results:" comment and the Py3 Unit tests / Py3 Pylint statuses.
-  # Like Jenkins (propagate: false), it runs even when unit tests failed.
+  # fork twin of the "Copy artifacts" + "Generate Reports" stages: the unchanged
+  # PullRequestReport.py compares this run's XMLs (LatestUnitTests) against the
+  # newest successful baseline run (MasterUnitTests), then posts the
+  # "GitHub Actions results:" comment and the two commit statuses.
   report:
-    # NOT gated on the unit-tests result: like Jenkins (propagate: false),
-    # the report must post the "GitHub Actions results:" comment and the statuses
-    # even when the test job failed
+    # NOT gated on the unit-tests result: like Jenkins, the report must post the
+    # comment and the statuses even when the test job failed
     needs: [begin, unit-tests]
     if: ${{ !cancelled() && needs.begin.result == 'success' }}
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
-      # twin of the WMCore-PR-Report "Setup" stage (cleanWs + venv +
-      # UnstableTests.txt); the workspace persists between runs on a
-      # self-hosted runner, so stale results MUST be removed before the
-      # downloads below (file names embed the run id and would accumulate).
-      # Unstable-test list read from this fork's master instead of dmwm master.
+      # twin of the "Setup" stage. The workspace persists between runs, so
+      # stale results MUST be removed before the downloads below: file names
+      # embed the run id and would otherwise accumulate.
+      # UnstableTests.txt is read from this fork's master.
       - name: Set up report environment
         env:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -512,9 +435,8 @@ jobs:
           report-venv/bin/pip -q install jinja2 xunitparser PyGithub
           curl -sf -o UnstableTests.txt \
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/test/etc/UnstableTests.txt"
-          # known-failures manifest for the run summary: PR head first (a PR
-          # that FIXES a known failure deletes its line in the same PR), fork
-          # master as fallback. Explains only - it has no vote in the gate.
+          # known-failures manifest for the run summary: PR head first, fork
+          # master as fallback. It only explains - it has no vote in the gate.
           curl -sf -o KnownFailures.txt \
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${HEAD_SHA:-master}/test/etc/KnownFailures.txt" \
             || curl -sf -o KnownFailures.txt \
@@ -522,9 +444,8 @@ jobs:
             || echo "no KnownFailures.txt available - every failing test will list as unexplained"
           mkdir -p artifacts
 
-      # these two tolerate missing artifacts (e.g. a job died before its
-      # upload): PullRequestReport.py skips report sections it has no input
-      # for. The baseline fetch below stays strict - no baseline, no report.
+      # these two tolerate missing artifacts: PullRequestReport.py skips report
+      # sections it has no input for. The baseline fetch below stays strict.
       - name: Fetch PR test results (LatestUnitTests)
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -566,10 +487,8 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # A partial run must never reach PullRequestReport.py: with slices
-      # missing, vanished tests are scored as 'deleted' and the report posts
-      # green statuses from the wreckage (run 32395662435 attempt 2: 11/14
-      # slices lost, deleted=1262, all 3 statuses success). Fail here instead;
-      # the always() default-status step then reports failure honestly.
+      # missing, vanished tests count as 'deleted' and it posts green statuses
+      # from the wreckage. Fail here instead.
       - name: Require complete results (all 14 slices, both sides)
         run: |
           python3 - <<'EOF'
@@ -588,12 +507,9 @@ jobs:
           EOF
 
       # twin of "Generate Reports": jinja templates from the VM-local
-      # WMCore-Jenkins clone (Jenkins checks the same repo out into its
-      # workspace). Posts the comment + the two named commit statuses.
-      # Two fork-only patches are applied to a throwaway copy at runtime:
-      # the comment's opening words (the runs come from GitHub Actions now,
-      # not Jenkins), and the pylint gate made delta-aware (fail only on NEW
-      # W/E events - see .github/ci/patch-pylint-delta.py for the rationale).
+      # WMCore-Jenkins clone. Posts the comment + the two named commit statuses.
+      # Two fork-only patches go to a throwaway copy at runtime: the comment's
+      # opening words, and a delta-aware pylint gate (fail only on NEW W/E).
       - name: Generate report and update PR (PullRequestReport.py)
         env:
           DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -601,24 +517,20 @@ jobs:
           CODE_REPO: WMCore
           JENKINS_JINJA_TEMPLATE_PATH: ${{ env.WMCORE_JENKINS_HOST_DIR }}/templates
         run: |
-          # Fork-only wording change: the upstream script is dmwm-owned and the
-          # VM clone is mounted read-only, so patch a throwaway copy instead of
-          # vendoring all of its pylint/xunit/jinja logic.
+          # Fork-only wording change. The VM clone is read-only, so patch a
+          # throwaway copy. The grep fails loudly if upstream text drifts.
           cp "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestReport.py" \
              "$RUNNER_TEMP/PullRequestReport.py"
           grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
             || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
           sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
           # Delta-aware pylint gate (fail only on NEW W/E). The patcher comes
-          # from the unit-tests job's checkout (path: wmcore-src): jobs share
-          # this runner's persistent workspace. It exits 1 on upstream drift,
-          # keeping the same loud-guard contract as the grep above.
+          # from the unit-tests job's checkout. It also exits 1 on upstream drift.
           python3 "$GITHUB_WORKSPACE/wmcore-src/.github/ci/patch-pylint-delta.py" \
             "$RUNNER_TEMP/PullRequestReport.py"
           # tee the output: the run-summary step reads the printed
           # "Python3 Unit Test summary {...}" dict instead of recomputing the
-          # gate itself (two implementations of the gate would eventually
-          # disagree on the same page). pipefail keeps a python crash fatal.
+          # gate - two gates would disagree. pipefail keeps a crash fatal.
           set -o pipefail
           report-venv/bin/python "$RUNNER_TEMP/PullRequestReport.py" 2>&1 | tee report-stdout.txt
 
@@ -630,10 +542,9 @@ jobs:
           path: artifacts/PullRequestReport.html
           if-no-files-found: warn
 
-      # twin of the ghprb plugin behavior: Jenkins' PR builder flips the
-      # "default" status (set to pending by the begin job) to the build
-      # outcome when WMCore-PR-Report finishes. Posting without "context"
-      # makes GitHub use the name "default", same as the begin script.
+      # twin of the ghprb plugin: it flips the "default" status, set to pending
+      # by the begin job, to the build outcome. Posting without "context" makes
+      # GitHub name it "default", same as the begin script.
       - name: Finish default status (report job outcome)
         if: always()
         env:
@@ -647,21 +558,19 @@ jobs:
               "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${ghprbPullId}" \
               | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
           fi
-          # --retry: a transient 5xx AFTER the server committed the write once
-          # turned this whole run red (exit 22) although the status was posted
+          # --retry: without it a transient 5xx after the server committed the
+          # write turns the whole run red although the status was posted
           curl -sf --retry 3 --retry-all-errors -X POST -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${HEAD_SHA}" \
             -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
 
       # Operator-readable summary. Three rules keep it honest:
-      # 1. The gate verdict is NEVER recomputed here - line 1 quotes the
-      #    summary dict PullRequestReport.py printed (report-stdout.txt).
-      # 2. KnownFailures.txt only EXPLAINS the tests that fail on both sides;
-      #    it has no vote in the gate.
-      # 3. A failing test in NEITHER KnownFailures.txt NOR UnstableTests.txt
-      #    renders as a loud UNEXPLAINED section - that is the real signal.
-      # Globs ONLY LatestUnitTests - MasterUnitTests holds baseline XMLs with
-      # the same file-name shape, and counting them would double every number.
+      # 1. The verdict is NEVER recomputed here - it quotes the summary dict
+      #    PullRequestReport.py printed (report-stdout.txt).
+      # 2. KnownFailures.txt only explains failures; it has no vote in the gate.
+      # 3. A failure in neither manifest shows as a loud UNEXPLAINED section.
+      # Globs ONLY LatestUnitTests: MasterUnitTests holds baseline XMLs with the
+      # same file-name shape, and counting them would double every number.
       - name: Write run summary
         if: always()
         run: |
