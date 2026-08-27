@@ -14,6 +14,14 @@
 #   - stacks reach the internet through a per-stack host proxy on a unix socket
 #   - dummy secrets and a self-signed cert; DMWMBOT_TOKEN is the own GITHUB_TOKEN
 #   - git URLs redirect dmwm/WMCore -> this fork. DELETE when moving upstream.
+#
+# Fork PRs (the Jenkins "test this please" flow): a pull_request run from a
+# fork is skipped by the job guards, and GitHub gives such runs a read-only
+# token anyway, so the status posts would fail. To test a fork PR: review the
+# diff, then dispatch this workflow with its pr_number. A dispatch runs with
+# full permissions and fetches refs/pull/<n>/head, which exists in this repo
+# for every PR. First gate: repo setting "require approval for workflow runs
+# from all outside collaborators" (verified on).
 
 name: WMCore PR tests
 
@@ -71,6 +79,8 @@ jobs:
   begin:
     # Never run for a pull request opened from another fork: it would run
     # untrusted code on a runner that mounts the grid cert and rucio account.
+    # Fork PRs are tested by dispatching with their pr_number after review
+    # (see the header).
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
