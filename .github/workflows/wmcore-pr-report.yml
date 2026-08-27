@@ -1,17 +1,12 @@
 # WMCore PR report: posts the "GitHub Actions results:" comment and the commit
 # statuses for a completed "WMCore PR tests" run. Jenkins twin: WMCore-PR-Report.
 #
-# Why a separate workflow: a test run started by a fork pull_request holds a
-# read-only token and cannot post anything. This workflow is triggered by the
-# base repo itself (workflow_run), so it always gets a write token - fork PRs
-# included. That makes "approve the run, results arrive by themselves" work.
-# NOTE: workflow_run only fires once this file is on the default branch.
+# Why a separate workflow: a fork pull_request run holds a read-only token,
+# but this base-repo workflow_run always gets a write token, fork PRs included.
 #
-# Security contract: this workflow never checks out or executes PR code. It
-# only PARSES the test run's artifacts (XML and JSON). The pr-context artifact
-# is data, not trusted: the PR number must be plain digits, and for a
-# pull_request-triggered test run it must name the PR whose head SHA equals
-# the SHA that run tested - otherwise this workflow refuses to post.
+# Security contract: never checks out or executes PR code, only parses its
+# artifacts; the pr-context artifact is untrusted, so its PR number must be
+# plain digits and match the head SHA the test run actually tested.
 
 name: WMCore PR report
 
@@ -39,8 +34,8 @@ permissions:
 env:
   ghprbTargetBranch: master
   BUILD_ID: ${{ github.run_id }}
-  # the PR comment links here; the pr-report artifact is uploaded to THIS run,
-  # and the trailing '#' keeps the path the script appends a harmless fragment
+  # the PR comment links here; the trailing '#' keeps the path the script
+  # appends a harmless fragment
   BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
   # VM-local clone of the private dmwm/WMCore-Jenkins
   WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
@@ -53,11 +48,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
-      # Which test run, which PR. On dispatch both come from the inputs. On
-      # workflow_run the PR number comes from the test run's pr-context
-      # artifact (the event payload omits fork PRs), validated as described in
-      # the header. A test run whose jobs were all guard-skipped uploaded no
-      # artifact - then there is nothing to report and every later step skips.
+      # Which test run, which PR. On dispatch both come from inputs; on
+      # workflow_run the PR number comes from the pr-context artifact, since
+      # the event payload omits fork PRs (validated as in the header).
       - name: Resolve which test run to report on
         id: ctx
         env:
@@ -102,10 +95,9 @@ jobs:
           echo "test-run-id=${test_run_id}" >> "$GITHUB_OUTPUT"
           echo "Reporting on test run ${test_run_id} for PR ${pr} (head ${head_sha})"
 
-      # The workspace persists between runs on this runner, so stale results
-      # MUST be removed before the downloads (file names embed run ids).
-      # UnstableTests.txt is read from this fork's master; KnownFailures.txt
-      # PR-head first, so a PR that fixes a known failure explains itself.
+      # The workspace persists between runs, so stale results must be removed
+      # first. KnownFailures.txt is read PR-head first, so a PR that fixes a
+      # known failure explains itself.
       - name: Set up report environment
         if: steps.ctx.outputs.should == 'true'
         run: |
@@ -172,8 +164,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       # A partial run must never reach PullRequestReport.py: with slices
-      # missing, vanished tests count as 'deleted' and it posts green statuses
-      # from the wreckage. Fail here instead.
+      # missing it posts green statuses from the wreckage. Fail here instead.
       - name: Require complete results (all 14 slices, both sides)
         if: steps.ctx.outputs.should == 'true'
         run: |
@@ -193,9 +184,8 @@ jobs:
           EOF
 
       # twin of "Generate Reports": jinja templates from the VM-local
-      # WMCore-Jenkins clone. Posts the comment + the two named commit statuses.
-      # Two fork-only patches go to a throwaway copy at runtime: the comment's
-      # opening words, and a delta-aware pylint gate (fail only on NEW W/E).
+      # WMCore-Jenkins clone, patched with two fork-only changes at runtime
+      # (comment wording, delta-aware pylint gate).
       - name: Generate report and update PR (PullRequestReport.py)
         if: steps.ctx.outputs.should == 'true'
         env:
@@ -211,15 +201,13 @@ jobs:
           grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
             || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
           sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
-          # Delta-aware pylint gate (fail only on NEW W/E). The patcher lives in
-          # this repo; fetch the master copy, since this workflow checks out no
-          # code. It exits 1 on upstream drift.
+          # Delta-aware pylint gate (fail only on NEW W/E); fetch the patcher
+          # from master since this workflow checks out no code.
           curl -sf -o "$RUNNER_TEMP/patch-pylint-delta.py" \
             "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/.github/ci/patch-pylint-delta.py"
           python3 "$RUNNER_TEMP/patch-pylint-delta.py" "$RUNNER_TEMP/PullRequestReport.py"
-          # tee the output: the run-summary step reads the printed
-          # "Python3 Unit Test summary {...}" dict instead of recomputing the
-          # gate - two gates would disagree. pipefail keeps a crash fatal.
+          # tee the output: the run-summary step reads the printed summary
+          # dict instead of recomputing the gate. pipefail keeps a crash fatal.
           set -o pipefail
           report-venv/bin/python "$RUNNER_TEMP/PullRequestReport.py" 2>&1 | tee report-stdout.txt
 
@@ -231,9 +219,8 @@ jobs:
           path: artifacts/PullRequestReport.html
           if-no-files-found: warn
 
-      # twin of the ghprb plugin: it flips the "default" status, set to pending
-      # by the begin job (absent on fork PRs - then this creates it), to the
-      # outcome of this report job.
+      # twin of the ghprb plugin: flips the "default" status (set to pending
+      # by the begin job) to the outcome of this report job.
       - name: Finish default status (report job outcome)
         if: always() && steps.ctx.outputs.should == 'true'
         env:
@@ -247,13 +234,9 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
             -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
 
-      # Operator-readable summary. Three rules keep it honest:
-      # 1. The verdict is NEVER recomputed here - it quotes the summary dict
-      #    PullRequestReport.py printed (report-stdout.txt).
-      # 2. KnownFailures.txt only explains failures; it has no vote in the gate.
-      # 3. A failure in neither manifest shows as a loud UNEXPLAINED section.
-      # Globs ONLY LatestUnitTests: MasterUnitTests holds baseline XMLs with the
-      # same file-name shape, and counting them would double every number.
+      # Operator-readable summary: the verdict quotes PullRequestReport.py's
+      # printed dict rather than recomputing it, and globs only
+      # LatestUnitTests since MasterUnitTests would double the counts.
       - name: Write run summary
         if: always() && steps.ctx.outputs.should == 'true'
         run: |
