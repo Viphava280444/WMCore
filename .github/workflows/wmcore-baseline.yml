@@ -1,36 +1,20 @@
 # WMCore baseline test run, migrated from Jenkins.
 #
-# Fork twin of two Jenkins jobs in dmwm/WMCore-Jenkins:
-#   - WMCore-TagBaseline (ContainerScripts/tagLatestWMCore.sh): tag master as
-#     JENKINS_<timestamp> and push it. PR test runs merge the PR onto the
-#     newest JENKINS_* tag they can see (TestScripts/test-wmcorepy3.sh), so
-#     this tag pins the same base commit the baseline tested.
-#   - WMCore-unittests-baseline: run the full 12-slice unit test suite on
-#     master and keep the nosetests XML files. The PR report job downloads
-#     them from the latest successful run of this workflow as its
-#     "MasterUnitTests" baseline (Jenkins: copyArtifacts lastSuccessful).
+# It does two things:
+#   - Tags master as JENKINS_<timestamp>. PR runs merge the PR onto the newest
+#     JENKINS_* tag, so this tag pins the base commit the baseline tested.
+#   - Runs the full unit test suite on master and keeps the nosetests XML.
+#     The PR report job downloads them from the latest successful run of this
+#     workflow as its baseline.
 #
-# Why this exists: PullRequestReport.py only flags tests that CHANGED between
-# baseline and PR. A test failing in both runs does not count against the PR.
-# This baseline runs with the same dummy secrets and self-signed certificate
-# as the PR runs (the fork stores no credentials), so environment-caused
-# failures appear on both sides and cancel out in the comparison.
+# Why: PullRequestReport.py only flags tests that CHANGED between baseline and
+# PR. Baseline and PR must run in the same environment, so environment-caused
+# failures appear on both sides and cancel out.
 #
-# Differences from Jenkins, on purpose:
-#   - WMCore-Aggregate-Baseline is not ported: in the current Jenkins config
-#     its MasterUnitTests directory is never populated, so its CompareTests.py
-#     "Daily" mode degenerates to listing every test. Its useful outputs
-#     (test trend, latest tag) are covered here by the run summary and the
-#     pushed JENKINS_* tag.
-#   - No retry around slices: the Jenkins baseline runs each slice once
-#     (only the PR job wraps slices in retry(5)), so this does the same.
-#   - Old JENKINS_* tags are pruned after 7 days (the live Jenkins also
-#     removes previous days' tags; upstream keeps a few days around).
+# Each slice runs once, no retry. Old JENKINS_* tags are pruned after 7 days.
 #
-# The cron mirrors the live Jenkins cadence (fresh tags appear upstream about
-# 04:21 and 15:21 CERN time). GitHub only fires cron from the default branch,
-# so the schedule is inactive while this file lives on a feature branch;
-# workflow_dispatch is the trigger until then.
+# GitHub only fires cron from the default branch, so the schedule is inactive
+# on a feature branch; use workflow_dispatch there.
 
 name: WMCore baseline
 
@@ -42,22 +26,20 @@ on:
 permissions:
   contents: write   # push and prune the JENKINS_<timestamp> tags
 
-# shared with the unit-tests job of wmcore-pr-test.yml: a PR run now occupies
-# the whole VM with three parallel test stacks, so baseline and PR test runs
-# must queue behind each other instead of fighting for cores and RAM disk
+# Shared with the unit-tests job of wmcore-pr-test.yml. A test run uses the
+# whole VM, so baseline and PR runs must queue instead of overlapping.
 concurrency:
   group: vocms047-tests
   cancel-in-progress: false
 
 env:
-  # same environment as wmcore-pr-test.yml on purpose: the comparison in
-  # PullRequestReport.py is only meaningful when baseline and PR runs share it
+  # Must match wmcore-pr-test.yml. The PR/baseline comparison is only
+  # meaningful when both runs share this environment.
   WMA_TAG: '2.3.3'
   COUCH_TAG: '3.2.2'
   MDB_TAG: '10.6.19'
-  # Jenkins WMCore-unittests-baseline uses the wmcore-unittests compose
-  # service (same wmcore-dev image; its compose entry takes no ghprbPullId,
-  # which keeps test-wmcorepy3.sh in plain-master mode: no PR merge)
+  # This compose service takes no ghprbPullId, which keeps
+  # test-wmcorepy3.sh in plain-master mode: no PR merge.
   TEST_SERVICE: 'wmcore-unittests'
   SLICES: '12'
   WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
@@ -69,12 +51,11 @@ env:
   DMWMBOT_TOKEN: ''
   WMCORE_JENKINS_ORG: dmwm
   WMCORE_JENKINS_REF: main
-  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file
+  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file.
   WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
 
 jobs:
-  # fork twin of WMCore-TagBaseline + tagLatestWMCore.sh. Observed live tag
-  # format on dmwm/WMCore: JENKINS_YYYYmmddHHMMSS, twice a day.
+  # Tag format must stay JENKINS_YYYYmmddHHMMSS: other jobs match that pattern.
   tag-baseline:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
@@ -91,8 +72,7 @@ jobs:
           git push origin "$TAG"
           echo "Pushed baseline tag $TAG at commit $(git rev-parse HEAD)"
 
-      # deleting a remote tag only needs its name, so work from ls-remote and
-      # never touch anything that does not match the JENKINS_<14 digits> shape
+      # Never delete a tag that does not match JENKINS_<14 digits>.
       - name: Prune baseline tags older than 7 days
         run: |
           cutoff=$(date -u -d '7 days ago' +%Y%m%d%H%M%S)
@@ -104,9 +84,8 @@ jobs:
               fi
             done
 
-  # fork twin of WMCore-unittests-baseline: same container startup as the PR
-  # unit tests, but no ghprbPullId anywhere, so the unchanged test script
-  # tests plain master (which the fork redirect points at this fork's master)
+  # Same container startup as the PR unit tests, but no ghprbPullId, so the
+  # test script tests plain master.
   unit-tests:
     needs: tag-baseline
     runs-on: [self-hosted, Linux, X64]
@@ -115,9 +94,8 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        # 12 and 13 exist beyond SLICES=12: the per-method hash scatters ~21
-        # real tests there (Api_t, Simple_t). The PR run tests 0..13, so the
-        # baseline must cover the same axis or those tests diff as "new".
+        # Slices 12 and 13 exist beyond SLICES=12 and hold real tests. The PR
+        # run tests 0..13, so the baseline must too, or they diff as "new".
         slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     env:
       SLICE: ${{ matrix.slice }}
@@ -134,9 +112,8 @@ jobs:
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
           echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
-          # the override runs the stack on its own bridge network now (so that
-          # PR tests can run several stacks side by side); on that network the
-          # containers have no NAT, so egress goes through the host proxy below
+          # The stack runs on its own bridge network with no NAT, so container
+          # egress must go through the host proxy below.
           echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"
           echo "WMCI_PROXY=http://127.0.0.1:3128" >> "$GITHUB_ENV"
           docker version
@@ -156,12 +133,10 @@ jobs:
       - name: Stop leftover containers
         run: |
           [ -n "$COMPOSE_FILE" ] && docker compose down --remove-orphans || true
-          # compose down only removes containers from this compose project; the
-          # compose file pins daemon-global container_names, so a foreign container
-          # holding "couchdb"/"mariadb" blocks every run (2026-08-04..18 outage)
+          # compose down only removes this project's containers. Container names
+          # are daemon-global, so a foreign "couchdb"/"mariadb" blocks every run.
           docker rm -f couchdb mariadb 2>/dev/null || true
 
-      # same startup sequence as the Jenkinsfile
       - name: Start containers
         run: |
           docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
@@ -177,8 +152,8 @@ jobs:
           echo "--Check wmcore-unittest logs"
           docker compose logs "$TEST_SERVICE"
 
-      # the image entrypoint clones WMCore + copies the CI scripts at container
-      # start; wait until that setup is really done
+      # The entrypoint clones WMCore and copies the CI scripts at container
+      # start. Wait until that is done.
       - name: Wait for container CI setup
         run: |
           ready=""
@@ -193,10 +168,8 @@ jobs:
           fi
           docker compose logs "$TEST_SERVICE"
 
-      # Fork testing only: the unchanged scripts hardcode dmwm/WMCore, so make
-      # git resolve that URL to this fork. In baseline mode the script only
-      # does `git pull origin master`, which this points at the fork's master.
-      # DELETE this step when the workflow moves upstream.
+      # Fork testing only: the scripts hardcode dmwm/WMCore, so point git at
+      # this fork. DELETE this step when the workflow moves upstream.
       - name: Point dmwm/WMCore at this fork
         run: |
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
@@ -205,11 +178,9 @@ jobs:
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"
             cat "$GIT_CONFIG_GLOBAL"'
-          # Hard-sync the image's cached clone to fork master BEFORE the
-          # unchanged script's `git pull origin master` (test-wmcorepy3.sh):
-          # once fork master moves past the clone's baked-in state that pull
-          # is a divergence and git refuses it, killing every slice
-          # (run 32395662435 attempt 2: 11/14 slices produced no XML).
+          # Hard-sync the cached clone to master before the script's
+          # `git pull origin master`. Without this the pull sees a divergence,
+          # git refuses, and every slice dies.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" bash -c '
@@ -217,7 +188,7 @@ jobs:
             git fetch origin master
             git checkout -q -B master FETCH_HEAD'
 
-      # single attempt, like the Jenkins baseline; note: no ghprbPullId here
+      # Single attempt, no retry. No ghprbPullId here.
       - name: Run test slice
         run: |
           echo "Baseline: testing slice $SLICE of $SLICES for build $BUILD_ID"
@@ -248,8 +219,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      # the workspace persists between runs on a self-hosted runner; drop
-      # stale results so the counts only cover this run
+      # The workspace persists between runs on a self-hosted runner. Drop stale
+      # results, or they get counted as this run's.
       - name: Clean stale results
         run: rm -rf results
 

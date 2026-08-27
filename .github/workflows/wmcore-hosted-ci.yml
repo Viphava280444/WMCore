@@ -1,11 +1,9 @@
-# GitHub-hosted CI: zero CERN resources.
-#
-# Runs on ubuntu-latest with Docker Hub service containers (mariadb, couchdb)
-# and pip-only dependencies. ADDITIVE and advisory: wmcore-pr-test.yml on
-# vocms047 remains the authority for the contract commit statuses and the PR
-# comment. permissions is contents:read only, so this workflow structurally
-# cannot post statuses or comments. Scaffolding and the quarantine-list
-# rationale live in .github/ci/hosted/README.md.
+# GitHub-hosted CI, no CERN resources needed.
+# Advisory only: wmcore-pr-test.yml on vocms047 is still the
+# authority for commit statuses and the PR comment.
+# permissions is contents:read only, so this workflow cannot
+# post statuses or comments.
+# See .github/ci/hosted/README.md for scope and quarantine list.
 name: wmcore-hosted-ci
 
 on:
@@ -21,7 +19,7 @@ permissions:
 
 jobs:
   hosted-lint:
-    # context name must NOT collide with the vocms047 contexts
+    # context name must not collide with the vocms047 contexts
     # (default / Py3 Unit tests / Py3 Pylint)
     name: hosted-lint
     runs-on: ubuntu-latest
@@ -44,9 +42,8 @@ jobs:
       - name: pylint errors-only (BLOCKING)
         run: |
           [ -s changedFiles.txt ] || exit 0
-          # --disable=unrecognized-option is REQUIRED: standards/.pylintrc has
-          # legacy keys (files-output, include-id, ...) that pylint 3.2 reports
-          # as E0015, which would make -E fail on every PR
+          # --disable=unrecognized-option is required: standards/.pylintrc has
+          # legacy keys that pylint 3.2 flags as E0015, failing -E on every PR
           pylint -E --disable=unrecognized-option --rcfile=standards/.pylintrc $(cat changedFiles.txt)
       - name: pylint full + pycodestyle (ADVISORY)
         continue-on-error: true
@@ -86,22 +83,22 @@ jobs:
         env:
           COUCHDB_USER: admin
           COUCHDB_PASSWORD: couchpw
-        # host port MUST equal 5984: couch's replicator reconnects to the URL
-        # it is handed, so a remapped host port breaks replication tests
+        # host port must be 5984: couch's replicator reconnects to this URL,
+        # a remapped port breaks replication tests
         ports:
           - '5984:5984'
         options: >-
           --health-cmd "curl -sf http://127.0.0.1:5984/_up"
           --health-interval 10s --health-timeout 5s --health-retries 12
     env:
-      # client_flag=65536 = CLIENT.MULTI_STATEMENTS: WMInit.setSchemaFromModules
-      # feeds a whole wmcoredb .sql file as one statement
+      # client_flag=65536 = CLIENT.MULTI_STATEMENTS: needed because
+      # WMInit.setSchemaFromModules feeds a whole .sql file as one statement
       DATABASE: mysql://wmcore_unittest:wmcore_unittest@127.0.0.1:3306/wmcore_unittest?client_flag=65536
       DIALECT: MySQL
       COUCHURL: http://admin:couchpw@127.0.0.1:5984
       WMAGENT_SECRETS_LOCATION: ${{ github.workspace }}/.ci-secrets/WMAgent.secrets
-      # .github/ci/hosted first: python's site machinery imports its
-      # sitecustomize.py (PyMySQL as MySQLdb) at interpreter start
+      # .github/ci/hosted must come first: python auto-imports its
+      # sitecustomize.py (PyMySQL as MySQLdb) at startup
       PYTHONPATH: ${{ github.workspace }}/.github/ci/hosted:${{ github.workspace }}/src/python:${{ github.workspace }}/test/python
     steps:
       - uses: actions/checkout@v4
@@ -123,10 +120,9 @@ jobs:
       - name: sanity (fails fast with a readable message)
         run: python -c "import MySQLdb, sqlalchemy, wmcoredb; print('MySQLdb ->', MySQLdb.__name__, '| sqlalchemy', sqlalchemy.__version__)"
       - name: unit tests
-        # scope + quarantine list: see .github/ci/hosted/README.md; measured
-        # twice on fresh services: 162 passed, 2 skipped, 0 failed.
-        # -o python_files='*_t.py' is required for pytest to collect
-        # directories at all (WMCore's naming is not pytest's default)
+        # scope + quarantine list: see .github/ci/hosted/README.md
+        # -o python_files='*_t.py' is required: WMCore's test file
+        # naming is not pytest's default
         run: |
           python -m pytest -q -p no:cacheprovider -W ignore -o python_files='*_t.py' --junitxml=junit.xml \
             test/python/WMCore_t/WMBS_t test/python/WMCore_t/Database_t \

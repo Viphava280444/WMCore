@@ -1,30 +1,15 @@
 # Proves the self-hosted runner (vocms047) can log in to the Tier-0 hosts.
 #
-# WHY THIS EXISTS
-# The runner cannot SSH anywhere by default. It holds no Kerberos ticket of its
-# own, and its HOME is on AFS, which it cannot read without one. So key-based
-# login is out too: the target machines run sshd as root, root has no AFS token,
-# and the AFS permissions on the shared home are "list only" -- sshd can see
-# ~/.ssh/authorized_keys but cannot read it. Verified 2026-07-30: the correct
-# key was offered and still rejected.
+# Key-based login does not work: sshd runs as root, which has no AFS token
+# and cannot read ~/.ssh/authorized_keys. Kerberos does work, so this
+# workflow kinits from a keytab and logs in unattended, on a schedule.
 #
-# The one thing that does work is Kerberos, which is how an interactive login
-# already reaches those hosts. This workflow does that unattended: kinit from a
-# keytab, then log in and read a few facts. Running it on a schedule turns "SSH
-# works" from an assumption into something checked daily.
+# CREDENTIAL: /data/vkhlaisu/ci-secrets/cmst0.keytab, VM only, mode 400,
+# never in this repo. Uses the cmst0 service account (no sudo) instead of
+# a personal keytab, to avoid implying passwordless root.
 #
-# CREDENTIAL
-# /data/vkhlaisu/ci-secrets/cmst0.keytab -- on the VM only, mode 400, never in
-# this repo. It is for the Tier-0 service account cmst0, chosen over a personal
-# keytab because cmst0 has no sudo: it can read what the Tier-0 stack owns and
-# nothing more. A personal keytab would have implied passwordless root on both
-# machines.
-#
-# WHY THERE IS NO pull_request TRIGGER
-# Every job on this runner can read that keytab. A workflow reachable from a
-# stranger's pull request would be a way to steal it. Manual and scheduled runs
-# only. The same reasoning argues for setting the fork's Actions policy to
-# require approval for ALL outside contributors, not just first-timers.
+# No pull_request trigger: any job on this runner can read the keytab, so
+# a stranger's PR must never trigger it. Manual and scheduled runs only.
 name: T0 SSH check
 
 on:
@@ -40,8 +25,8 @@ on:
           - 'bad-host'
           - 'bad-keytab'
   schedule:
-    # 06:00 UTC daily. Deliberately away from the wmcore-baseline crons
-    # (02:21 and 13:21) so the runner is not busy with a 57-minute test suite.
+    # 06:00 UTC daily, offset from the wmcore-baseline crons so the runner
+    # is not busy with the test suite.
     - cron: '0 6 * * *'
 
 permissions:
@@ -80,14 +65,14 @@ jobs:
             echo "vkhlaisu and readable by them (mode 400 is fine)."
             exit 1
           fi
-          # -k prints the account names and key versions only. No secret material.
+          # -k lists account names and key versions only, no secret material.
           klist -k "$keytab"
 
       - name: Get a Kerberos ticket for cmst0
         run: |
           CC="$RUNNER_TEMP/krb5cc_ci"
-          # Keep the ticket out of the shared keyring cache the login session
-          # uses, so this job can never disturb an interactive session.
+          # Use a separate ticket cache so this job never disturbs an
+          # interactive login session.
           echo "KRB5CCNAME=FILE:$CC" >> "$GITHUB_ENV"
           export KRB5CCNAME="FILE:$CC"
           kinit -kt "$KEYTAB" "$PRINCIPAL"
@@ -99,17 +84,16 @@ jobs:
         run: |
           set -uo pipefail
 
-          # HOME points at AFS and is unreadable here. Give ssh a real directory
-          # so nothing it does falls back to an inaccessible path.
+          # HOME points at AFS and is unreadable here, so give ssh a real
+          # directory instead.
           export HOME="$RUNNER_TEMP/cihome"
           mkdir -p "$HOME"
 
           KH="$GITHUB_WORKSPACE/.github/ci/t0-hosts.known_hosts"
           PROBE="$GITHUB_WORKSPACE/.github/ci/t0-probe.sh"
 
-          # -F none skips every ssh config file, including the one on AFS. That
-          # also drops CERN's system-wide "GSSAPIAuthentication yes", so it has
-          # to be set here explicitly -- without it every login is refused.
+          # -F none skips ssh config (including AFS), which also disables
+          # GSSAPI auth -- set it explicitly here or every login is refused.
           SSHOPTS=(
             -o BatchMode=yes
             -o ConnectTimeout=10
@@ -153,10 +137,8 @@ jobs:
             field() { printf '%s\n' "$out" | sed -n "s/^$1=//p" | head -1; }
             who=$(field who)
 
-            # The only conditions that count as red are: ssh did not connect,
-            # the host key did not match, or we did not end up as cmst0.
-            # Everything else is reported but does not fail the run -- a machine
-            # with no containers is a normal state, not a broken check.
+            # Only fail on: ssh not connecting, host key mismatch, or not
+            # ending up as cmst0. A machine with no containers is fine.
             if [ "$who" != "cmst0" ]; then
               echo "::error::$h: logged in as '$who', expected cmst0"
               failed=1

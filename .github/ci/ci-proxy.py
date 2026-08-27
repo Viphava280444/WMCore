@@ -72,10 +72,9 @@ class Handler(socketserver.StreamRequestHandler):
             upstream.close()
 
     def plain_http(self, method, target, headers):
-        # Only proxy real web egress. build_opener() also registers urllib's
-        # default file://, ftp:// and data:// handlers, so a container could
-        # ask this host-side proxy to read a local file (e.g. the mounted grid
-        # key). Refuse any non-web scheme before it reaches the opener.
+        # Only proxy web egress. Refuse file://, ftp://, data:// etc, since a
+        # container could otherwise ask this proxy to read a local file
+        # (e.g. the mounted grid key).
         if urllib.parse.urlsplit(target).scheme.lower() not in ('http', 'https'):
             self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n'
                              b'Content-Length: 0\r\nConnection: close\r\n\r\n')
@@ -91,10 +90,8 @@ class Handler(socketserver.StreamRequestHandler):
         try:
             resp = OPENER.open(req, timeout=60)
         except urllib.error.HTTPError as httperr:
-            # a 3xx/4xx/5xx is a valid HTTP response the client must see:
-            # tests like Requests_t:test404Error assert on the status code,
-            # and swallowing it here turned into (52, 'Empty reply from
-            # server'); 3xx additionally needs its Location header relayed
+            # A 3xx/4xx/5xx is a valid HTTP response; relay it, don't swallow
+            # it. Tests like Requests_t:test404Error assert on the status code.
             resp = httperr
         with resp:
             body = resp.read()
@@ -123,8 +120,8 @@ class UnixProxy(socketserver.ThreadingUnixStreamServer):
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else '3128'
     if '/' in target:
-        # unix-socket mode: the VM's nftables drops all container<->host IP
-        # traffic, but a bind-mounted filesystem socket bypasses netfilter
+        # unix-socket mode: bypasses nftables, which blocks container<->host
+        # IP traffic on this VM
         import os
         try:
             os.unlink(target)
