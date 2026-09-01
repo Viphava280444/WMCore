@@ -11,7 +11,9 @@
 # PR. Baseline and PR must run in the same environment, so environment-caused
 # failures appear on both sides and cancel out.
 #
-# Each slice runs once, no retry. Old JENKINS_* tags are pruned after 7 days.
+# The 14 slices run as three isolated stacks in parallel, the same layout as
+# the unit-tests job of wmcore-pr-test.yml. Each slice runs once, no retry.
+# Old JENKINS_* tags are pruned after 7 days.
 #
 # GitHub only fires cron from the default branch, so the schedule is inactive
 # on a feature branch; use workflow_dispatch there.
@@ -84,21 +86,19 @@ jobs:
               fi
             done
 
-  # Same container startup as the PR unit tests, but no ghprbPullId, so the
-  # test script tests plain master.
+  # Same three-stack layout as the PR unit tests, but no ghprbPullId, so the
+  # test script tests plain master. The slice groups are the runtime-balanced
+  # 3-way split: stack 1 has the largest group, stack 3 the smallest.
   unit-tests:
     needs: tag-baseline
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        # Slices 12 and 13 exist beyond SLICES=12 and hold real tests. The PR
-        # run tests 0..13, so the baseline must too, or they diff as "new".
-        slice: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+    timeout-minutes: 45
     env:
-      SLICE: ${{ matrix.slice }}
+      STACK1_SLICES: '1 2 5 10 12'
+      STACK2_SLICES: '0 6 7 8 13'
+      STACK3_SLICES: '3 4 9 11'
+      # every slice id that must produce an XML for the run to count
+      ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
@@ -110,112 +110,244 @@ jobs:
           echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
-          echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
           echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
-          # The stack runs on its own bridge network with no NAT, so container
-          # egress must go through the host proxy below.
           echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"
-          echo "WMCI_PROXY=http://127.0.0.1:3128" >> "$GITHUB_ENV"
           docker version
           docker compose version
 
-      - name: Prepare workspace (fork twin of setup-env.sh)
-        run: bash wmcore-src/.github/ci/setup-env-gha.sh
-
-      - name: Start host egress proxy
-        run: |
-          SOCK="$HOST_MOUNT_DIR/tmp/wmci-egress.sock"
-          setsid nohup python3 wmcore-src/.github/ci/ci-proxy.py "$SOCK" > proxy.log 2>&1 &
-          echo $! > proxy.pid
-          sleep 2
-          test -S "$SOCK" || { echo "proxy socket missing"; cat proxy.log; exit 1; }
-
       - name: Stop leftover containers
         run: |
-          [ -n "$COMPOSE_FILE" ] && docker compose down --remove-orphans || true
-          # compose down only removes this project's containers. Container names
-          # are daemon-global, so a foreign "couchdb"/"mariadb" blocks every run.
+          # the vendored compose file pins daemon-global container_names, so a
+          # foreign container holding "couchdb"/"mariadb" blocks every run
           docker rm -f couchdb mariadb 2>/dev/null || true
-
-      - name: Start containers
-        run: |
-          docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
-          sleep 20
-          docker ps
-          echo "--Check MariaDB docker logs"
-          docker compose logs mariadb
-          echo "--Check CouchDB docker logs"
-          docker compose logs couchdb
-          echo "--Check CouchDB certificates"
-          docker compose exec -T couchdb ls -l /data/certs
-          docker compose exec -T couchdb openssl x509 -in /data/certs/servicecert.pem -noout -dates -subject
-          echo "--Check wmcore-unittest logs"
-          docker compose logs "$TEST_SERVICE"
-
-      # The entrypoint clones WMCore and copies the CI scripts at container
-      # start. Wait until that is done.
-      - name: Wait for container CI setup
-        run: |
-          ready=""
-          for i in $(seq 1 60); do
-            if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
-            sleep 5
+          # A stale ci-stack-K directory is worse than a stale container: its
+          # old XMLs would count as THIS run's results. The rm -rf below must
+          # always cover every stack index ever used.
+          for k in 1 2 3 4; do
+            docker rm -f "wmci${k}-mariadb" "wmci${k}-couchdb" 2>/dev/null || true
+            ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
+            [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
+            docker network rm "wmci${k}_stacknet" 2>/dev/null || true
           done
-          if [ -z "$ready" ]; then
-            echo "Entrypoint setup did not finish in time; container logs:"
-            docker compose logs "$TEST_SERVICE"
-            exit 1
-          fi
-          docker compose logs "$TEST_SERVICE"
+          docker network rm wmciwarm_stacknet 2>/dev/null || true
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 ci-stack-4 unit-test-xml
+          docker ps
 
-      # Fork testing only: the scripts hardcode dmwm/WMCore, so point git at
-      # this fork. DELETE this step when the workflow moves upstream.
-      - name: Point dmwm/WMCore at this fork
+      # one pull before the fan-out: stacks pulling the same images
+      # concurrently race each other in the local image store
+      - name: Warm images once
         run: |
+          export COMPOSE_PROJECT_NAME=wmciwarm
+          export HOST_MOUNT_DIR="$GITHUB_WORKSPACE/ci-stack-1"
+          export WMCI_MDB_DATA_DIR="/dev/shm/wmci-mdb-$(id -u)-warm"
+          mkdir -p "$HOST_MOUNT_DIR" "$WMCI_MDB_DATA_DIR"
+          docker compose pull --quiet mariadb couchdb "$TEST_SERVICE" || true
+          rm -rf "$WMCI_MDB_DATA_DIR"
+
+      # Each stack: own compose project, workspace, RAM data dir, bridge subnet
+      # and host egress proxy. Inside a stack the slices run one after another,
+      # once each. This step never decides the job outcome - the integrity check
+      # below does - so a teardown hiccup cannot turn a complete run red.
+      - name: Run 3 stacks in parallel
+        run: |
+          cat > stack-runner.sh <<'RUNNER'
+          #!/bin/bash
+          K="$1"; shift
+          SLICE_LIST="$*"
+          export COMPOSE_PROJECT_NAME="wmci$K"
+          export HOST_MOUNT_DIR="$GITHUB_WORKSPACE/ci-stack-$K"
+          export WMCI_MDB_DATA_DIR="/dev/shm/wmci-mdb-$(id -u)-$K"
+          export WMCI_NET="9$K"
+          export WMCI_PROXY="http://127.0.0.1:3128"
+          rc=0
+          # stagger the starts: simultaneous container creations on this
+          # VM's docker daemon trip over each other
+          sleep $(( (K-1) * 20 ))
+          bash wmcore-src/.github/ci/setup-env-gha.sh
+          setsid nohup python3 "$WMCI_CI_DIR/ci-proxy.py" "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" > "$HOST_MOUNT_DIR/proxy.log" 2>&1 &
+          echo $! > "$HOST_MOUNT_DIR/proxy.pid"
+          sleep 2
+          test -S "$HOST_MOUNT_DIR/tmp/wmci-egress.sock" || { echo "[S$K] proxy socket missing"; exit 1; }
+          docker compose down --remove-orphans || true
+          docker compose up --quiet-pull -d mariadb couchdb "$TEST_SERVICE"
+          # compose waits for couchdb but not for mariadb's init. Poll for the
+          # init marker: a slice run before the grants exist bakes DB errors
+          # into results that look valid.
+          mdb=""
+          for i in $(seq 1 150); do
+            if docker compose logs mariadb 2>/dev/null | grep -q "Start sleeping"; then mdb=1; break; fi
+            sleep 2
+          done
+          # fatal here, unlike the PR job: without a retry a DB-poisoned slice
+          # still writes XMLs, so the integrity check would pass a bad baseline
+          [ -n "$mdb" ] || { echo "[S$K] mariadb init marker not seen after 300s"; docker compose logs mariadb | tail -n 25; exit 1; }
+          ready=""
+          for i in $(seq 1 150); do
+            if docker compose exec -T "$TEST_SERVICE" test -f /home/cmsbld/TestScripts/test-wmcorepy3.sh; then ready=1; break; fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { echo "[S$K] entrypoint setup failed"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
+          # the entrypoint chowns the home tree after copying TestScripts; a
+          # slice started in that window dies on 'Permission denied'. With no
+          # retry to absorb a miss, a timeout here is fatal.
+          chowned=""
+          for i in $(seq 1 60); do
+            if docker compose exec -T -u "$MY_ID" "$TEST_SERVICE" test -w /home/cmsbld/etc; then chowned=1; break; fi
+            sleep 2
+          done
+          [ -n "$chowned" ] || { echo "[S$K] /home/cmsbld/etc still not writable after 120s"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
+          # Fork only: the unchanged scripts hardcode dmwm/WMCore, so make git
+          # resolve it to this fork. DELETE this when moving upstream.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
-            # modern git refuses a divergent pull without a strategy; the test
-            # script pulls master from a detached PR-merge state, so give it
+            # modern git refuses a divergent pull without a strategy; give it
             # the old silent-merge default
             git config --file "$GIT_CONFIG_GLOBAL" pull.rebase false
-            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"
-            cat "$GIT_CONFIG_GLOBAL"'
-          # Hard-sync the cached clone to master before the script's
-          # `git pull origin master`. Without this the pull sees a divergence,
-          # git refuses, and every slice dies.
+            git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
+          # Hard-sync the image's cached clone to fork master BEFORE the
+          # unchanged script's `git pull origin master`: once master moves past
+          # the baked-in state, that pull diverges and git refuses it, which
+          # kills every slice.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" bash -c '
             cd /home/cmsbld/WMCore
             git fetch origin master
             git checkout -q -B master FETCH_HEAD'
+          stack_start=$(date +%s)
+          for S in $SLICE_LIST; do
+            s0=$(date +%s)
+            ok=0
+            # single attempt, no retry: the Jenkins baseline never retried
+            echo "[S$K] baseline: testing slice $S of $SLICES for build $BUILD_ID"
+            if docker compose exec -T -u "$MY_ID" \
+                 -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
+                 -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+                 -e WMCORE_TEST_EXIT_ALARM=10 \
+                 -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
+                 "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
+              ok=1
+            else
+              echo "[S$K] slice $S failed"; rc=1
+            fi
+            echo "STACK$K slice=$S ok=$ok wall_seconds=$(( $(date +%s) - s0 ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
+          done
+          echo "STACK$K total_wall_seconds=$(( $(date +%s) - stack_start ))" >> "$HOST_MOUNT_DIR/artifacts/stack-timing.txt"
+          # backgrounded: teardown must not gate the step's wait; the Stop
+          # stacks step force-reaps whatever is left
+          (docker compose down || true) >/dev/null 2>&1 &
+          kill "$(cat "$HOST_MOUNT_DIR/proxy.pid")" 2>/dev/null || true
+          exit $rc
+          RUNNER
+          chmod +x stack-runner.sh
+          overall=$(date +%s)
+          ./stack-runner.sh 1 $STACK1_SLICES > stack1.log 2>&1 & P1=$!
+          ./stack-runner.sh 2 $STACK2_SLICES > stack2.log 2>&1 & P2=$!
+          ./stack-runner.sh 3 $STACK3_SLICES > stack3.log 2>&1 & P3=$!
+          wait $P1 || echo "stack1 reported a failing slice or setup error"
+          wait $P2 || echo "stack2 reported a failing slice or setup error"
+          wait $P3 || echo "stack3 reported a failing slice or setup error"
+          echo "PARALLEL total_wall_seconds=$(( $(date +%s) - overall ))"
+          echo "--- stack logs (tails) ---"
+          tail -n 25 stack1.log stack2.log stack3.log || true
+          # deliberately green: the XML integrity check is the gate
+          exit 0
 
-      # Single attempt, no retry. No ghprbPullId here.
-      - name: Run test slice
+      - name: Collect slice results
+        if: always()
         run: |
-          echo "Baseline: testing slice $SLICE of $SLICES for build $BUILD_ID"
-          docker compose exec -T -u "$MY_ID" \
-            -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$SLICE" \
-            -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
-            -e WMCORE_TEST_EXIT_ALARM=10 \
-            -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
-            "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh
+          rm -rf unit-test-xml
+          mkdir -p unit-test-xml
+          # one flat directory, so the report job's download has the exact
+          # shape PullRequestReport.py globs ('*/nosetestspy3-*.xml')
+          cp ci-stack-*/artifacts/nosetestspy3-*.xml unit-test-xml/ 2>/dev/null || true
+          cat ci-stack-*/artifacts/stack-timing.txt > stack-timing.txt 2>/dev/null || true
+          ls -l unit-test-xml
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: nosetests-slice-${{ matrix.slice }}
-          path: ci-workspace/artifacts/nosetests*.xml
+          # the name must keep matching the report job's nosetests-slice-*
+          # download pattern
+          name: nosetests-slice-all
+          path: unit-test-xml/nosetestspy3-*.xml
           if-no-files-found: warn
 
-      - name: Stop containers
+      - name: Upload stack logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stack-logs
+          path: |
+            stack-timing.txt
+            stack1.log
+            stack2.log
+            stack3.log
+          if-no-files-found: warn
+
+      # the job's verdict: every slice produced a parseable XML and the test
+      # count is sane. A partial baseline that reports success poisons every
+      # PR comparison, so missing XMLs fail the job; failing tests do not.
+      - name: Check result integrity
         if: always()
         run: |
-          [ -n "$COMPOSE_FILE" ] && docker compose down || true
-          [ -f proxy.pid ] && kill "$(cat proxy.pid)" 2>/dev/null || true
+          python3 - <<'EOF'
+          import glob, os, re, sys
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+          expected = os.environ['ALL_SLICES'].split()
+          total = fails = errs = 0
+          seen, rows, bad = set(), [], []
+          for f in sorted(glob.glob('unit-test-xml/nosetestspy3-*.xml')):
+              m = re.search(r'nosetestspy3-(\d+)-', os.path.basename(f))
+              try:
+                  root = ET.parse(f).getroot()
+              except ET.ParseError:
+                  bad.append(f)
+                  continue
+              if m:
+                  seen.add(m.group(1))
+              suites = [root] if root.tag == 'testsuite' else root.findall('testsuite')
+              for s in suites:
+                  total += int(s.get('tests', 0))
+                  fails += int(s.get('failures', 0))
+                  errs += int(s.get('errors', 0))
+                  rows.append(f"- `{os.path.basename(f)}`: {s.get('tests')} tests, "
+                              f"{s.get('failures')} failures, {s.get('errors')} errors")
+          missing = [s for s in expected if s not in seen]
+          timing = open('stack-timing.txt').read() if os.path.exists('stack-timing.txt') else ''
+          lines = ['## WMCore baseline unit tests (3 parallel stacks)', '',
+                   f'**{total} tests** in {len(seen)}/{len(expected)} slices, '
+                   f'{fails} failures, {errs} errors', ''] + rows + ['', '```', timing, '```']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(lines) + '\n')
+          if bad:
+              print('unparseable result files: %s' % ', '.join(bad))
+          if missing:
+              print('MISSING result XML for slices: %s' % ' '.join(missing))
+          # a far too low total means slices died before writing results,
+          # however green the containers looked
+          if total < 1000:
+              print('IMPLAUSIBLE total test count: %d' % total)
+          sys.exit(1 if (bad or missing or total < 1000) else 0)
+          EOF
+
+      - name: Stop stacks
+        if: always()
+        run: |
+          for k in 1 2 3 4; do
+            [ -f "ci-stack-$k/proxy.pid" ] && kill "$(cat "ci-stack-$k/proxy.pid")" 2>/dev/null || true
+            ids=$(docker ps -aq --filter "label=com.docker.compose.project=wmci${k}" 2>/dev/null || true)
+            [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
+            docker network rm "wmci${k}_stacknet" 2>/dev/null || true
+            rm -rf "/dev/shm/wmci-mdb-$(id -u)-$k"
+          done
+          docker ps
 
   summary:
     needs: unit-tests
