@@ -47,7 +47,7 @@ export X509_USER_KEY=$CERT_DIR/servicekey.pem
 # source $INSTALL_DIR/current/apps/wmagentpy3/etc/profile.d/init.sh
 # source $INSTALL_DIR/current/apps/wmcorepy3-devtools/etc/profile.d/init.sh
 
-### some Rucio setup needed for jenkins and docker unit tests
+### some Rucio setup needed for the CI and docker unit tests
 # fetch the values defined in the secrets file and update rucio.cfg file
 export RUCIO_HOME=$BASE_DIR # TODO: Change to specific rucio directory
 MATCH_RUCIO_HOST=`cat $WMAGENT_SECRETS_LOCATION | grep RUCIO_HOST | sed s/RUCIO_HOST=//`

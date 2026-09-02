@@ -1,8 +1,8 @@
-# Comment trigger, the Jenkins "test this please" twin.
+# Comment trigger, the previous CI's "test this please" twin.
 #
-# The sentence is deliberately DIFFERENT from the Jenkins one, so if this
-# workflow ever runs beside Jenkins upstream, one comment can never start
-# both systems.
+# The sentence is deliberately DIFFERENT from the previous CI's one, so if
+# this workflow ever runs beside that system upstream, one comment can never
+# start both.
 #
 # A collaborator with write access comments the sentence
 #     gha test please

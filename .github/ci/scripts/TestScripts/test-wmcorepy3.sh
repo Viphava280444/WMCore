@@ -47,19 +47,24 @@ pushd $CODE
 
 git pull origin master
 
-# use ghprbPullId if triggered from a PR
-if [[ ! -z "${ghprbPullId}" ]]; then
-    git fetch --tags https://github.com/dmwm/WMCore.git "+refs/heads/*:refs/remotes/origin/*"
-    git config remote.origin.url https://github.com/dmwm/WMCore.git
+# use PR_NUMBER if triggered from a PR
+if [[ ! -z "${PR_NUMBER}" ]]; then
+    WMCORE_URL="https://github.com/${WMCORE_ORG:-dmwm}/WMCore.git"
+    git fetch --tags "$WMCORE_URL" "+refs/heads/*:refs/remotes/origin/*"
+    git config remote.origin.url "$WMCORE_URL"
     git config --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
-    git fetch --tags --quiet  https://github.com/dmwm/WMCore.git "+refs/pull/*:refs/remotes/origin/pr/*"
-    export COMMIT=`git rev-parse "origin/pr/$ghprbPullId/merge^{commit}"`
-    export LATEST_TAG=`git tag |grep JENKINS| sort | tail -1`
+    git fetch --tags --quiet  "$WMCORE_URL" "+refs/pull/*:refs/remotes/origin/pr/*"
+    export COMMIT=`git rev-parse "origin/pr/$PR_NUMBER/merge^{commit}"`
+    export LATEST_TAG=`git tag |grep BASELINE| sort | tail -1`
+    echo "Baseline tag to merge onto: ${LATEST_TAG:-<none found, falling back to master>}"
 
     # First try to merge this PR into the same tag used for the baseline
     # Next try to merge this tag onto current master
     # Finally give up and just test the tip of the branch
-    (git checkout $LATEST_TAG && git merge $COMMIT) || (git checkout master && git merge $COMMIT) || git checkout -f $COMMIT
+    # LATEST_TAG is quoted: unquoted, an empty value makes `git checkout` a
+    # silent no-op that returns 0, so the first branch would "succeed" while
+    # merging onto master tip without saying so.
+    (git checkout "$LATEST_TAG" && git merge $COMMIT) || (git checkout master && git merge $COMMIT) || git checkout -f $COMMIT
 fi
 
 echo $PYTHONPATH
@@ -83,9 +88,12 @@ perl -p -i -e "s/'--cover-html',//" $CODE/setup_test.py
 #export NOSE_PROCESS_TIMEOUT=300
 #export NOSE_PROCESS_RESTARTWORKER=1
 
-# include FWCore.ParameterSet.Config
+# Prepend the runner's additional-library dir, if it has one. The previous CI
+# hardcoded its own VM path here to pick up FWCore.ParameterSet.Config; the
+# path is now supplied by WMCI_EXTRA_PYTHONPATH (empty on a runner without
+# such a directory, which leaves PYTHONPATH untouched).
 
-export PYTHONPATH=/var/lib/jenkins/additional-library:$PYTHONPATH
+export PYTHONPATH=${WMCI_EXTRA_PYTHONPATH:+${WMCI_EXTRA_PYTHONPATH}:}$PYTHONPATH
 
 # remove old coverage data
 if [ -x "$(command -v coverage --version)" ]; then

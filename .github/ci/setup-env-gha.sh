@@ -1,7 +1,7 @@
 #!/bin/bash -e
-# Fork-CI twin of dmwm/WMCore-Jenkins WMCore-Test-Base/setup-env.sh.
-# Same workspace tree and sed fixes. Jenkins copies real secrets and grid
-# certs; this repo stays secret-free and writes dummy credentials instead.
+# Fork-CI twin of the previous CI's WMCore-Test-Base/setup-env.sh.
+# Same workspace tree and sed fixes. The previous CI copied real secrets and
+# grid certs; this repo stays secret-free and writes dummy credentials instead.
 
 WORKSPACE="${HOST_MOUNT_DIR:?HOST_MOUNT_DIR must be set}"
 : "${COUCH_TAG:?}" "${MDB_TAG:?}" "${WMA_TAG:?}"
@@ -23,7 +23,7 @@ mkdir -p "$WORKSPACE"/srv/wmagent/"${WMA_TAG}"/logs
 mkdir -p "$WORKSPACE"/srv/wmagent/"${WMA_TAG}"/state
 mkdir -p "$WORKSPACE"/srv/wmagent/"${WMA_TAG}"/config
 
-# secrets: dummy values, same variable names as the Jenkins template.
+# secrets: dummy values, same variable names as the previous CI's template.
 cat > "$WORKSPACE"/admin/wmagent/WMAgent.secrets <<'EOF'
 MYSQL_USER=unittestagent
 MYSQL_PASS=passwd
@@ -56,15 +56,15 @@ mkdir -p "$WORKSPACE"/tmp
 
 # containers resolve the runner uid through these generated files (the VM
 # account is from sssd, not in host /etc/passwd).
-if [ -n "${WMCORE_JENKINS_HOST_DIR:-}" ] && [ -f "$WMCORE_JENKINS_HOST_DIR/WMCore-PR-test/setup-users.sh" ]; then
+if [ -n "${WMCI_SCRIPTS_DIR:-}" ] && [ -f "$WMCI_SCRIPTS_DIR/WMCore-PR-test/setup-users.sh" ]; then
     MY_USER="$(id -un)" MY_GROUP="$(id -g)" HOST_MOUNT_DIR="$WORKSPACE" \
-        bash "$WMCORE_JENKINS_HOST_DIR/WMCore-PR-test/setup-users.sh"
+        bash "$WMCI_SCRIPTS_DIR/WMCore-PR-test/setup-users.sh"
 fi
 
 # Real credentials, if present on the runner VM: a directory outside the
 # repo provides the grid certificate pair and rucio account name. Repo stays
 # secret-free; if the directory is missing, CI falls back to a dummy pair.
-CI_SECRETS_DIR="${WMCI_SECRETS_DIR:-/data/vkhlaisu/ci-secrets}"
+CI_SECRETS_DIR="${WMCI_SECRETS_DIR:-/data/$(id -un)/ci-secrets}"
 if [ -f "$CI_SECRETS_DIR/usercert.pem" ] && [ -f "$CI_SECRETS_DIR/userkey.pem" ]; then
     echo "Using grid certificate pair from $CI_SECRETS_DIR"
     cp "$CI_SECRETS_DIR/usercert.pem" "$WORKSPACE"/certs/servicecert.pem

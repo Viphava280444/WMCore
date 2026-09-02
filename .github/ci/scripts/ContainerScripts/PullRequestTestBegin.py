@@ -18,8 +18,8 @@ repoName = f'{teamName}/{codeRepo}'
 
 issueID = None
 
-if 'ghprbPullId' in os.environ:
-    issueID = os.environ['ghprbPullId']
+if 'PR_NUMBER' in os.environ:
+    issueID = os.environ['PR_NUMBER']
     mode = 'PR'
 elif 'TargetIssueID' in os.environ:
     issueID = os.environ['TargetIssueID']

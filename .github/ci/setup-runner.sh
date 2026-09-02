@@ -2,19 +2,23 @@
 # Prepare a new self-hosted runner VM for the WMCore CI.
 #
 # Run as the future runner user on the VM. Idempotent: safe to re-run.
-# Everything the CI executes lives in this repo (the Jenkins-era scripts
-# are vendored under .github/ci/scripts); the only hand step left is
+# Everything the CI executes lives in this repo (the vendored CI scripts
+# are under .github/ci/scripts); the only hand step left is
 # pasting a runner registration token from the repo's Settings page.
 #
 # Usage:
 #   setup-runner.sh --repo <owner/repo> [--token <registration-token>]
-#     [--secrets-dir /data/$USER/ci-secrets]
-#     [--runner-dir  /data/$USER/actions-runner]
+#     [--secrets-dir /data/<runner user>/ci-secrets]
+#     [--runner-dir  /data/<runner user>/actions-runner]
 
 REPO=""
 REG_TOKEN=""
-SECRETS_DIR="/data/$USER/ci-secrets"
-RUNNER_DIR="/data/$USER/actions-runner"
+# id -un, not $USER: under sudo -u / su / systemd $USER can be unset or stale,
+# which would build /data//ci-secrets while the workflows read
+# /data/<runner user>/ci-secrets and silently find no credentials.
+RUNNER_USER="$(id -un)"
+SECRETS_DIR="/data/$RUNNER_USER/ci-secrets"
+RUNNER_DIR="/data/$RUNNER_USER/actions-runner"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -50,10 +54,10 @@ fi
 
 note "== 2/5 docker access"
 if docker ps >/dev/null 2>&1; then
-  note "docker works for user $USER"
+  note "docker works for user $RUNNER_USER"
 else
-  note "user $USER cannot talk to docker. As root, run:"
-  note "  usermod -aG docker $USER"
+  note "user $RUNNER_USER cannot talk to docker. As root, run:"
+  note "  usermod -aG docker $RUNNER_USER"
   note "then LOG OUT AND BACK IN and re-run this script."
   note "(If the runner service already exists, restart it too - a running"
   note " service keeps its old group list and fails silently.)"
@@ -70,6 +74,9 @@ Optional. To run the tests with real grid credentials, place here BY HAND:
   usercert.pem       (mode 644)  your grid certificate
   userkey.pem        (mode 400)  its key, passphrase-free
   rucio_account.txt  one line: the rucio account name
+The Tier-0 SSH check (t0-ssh-check.yml) reads one more file from this same
+directory; the unit tests do not need it:
+  cmst0.keytab       (mode 400)  kerberos keytab for the cmst0 principal
 Never commit these anywhere. Without them the CI generates a self-signed
 pair and the extra environment failures are forgiven by the baseline diff.
 EOF
@@ -90,7 +97,7 @@ else
   [ -n "$REG_TOKEN" ] || { note "get a registration token from https://github.com/$REPO/settings/actions/runners/new and re-run with --token"; exit 1; }
   ./config.sh --url "https://github.com/$REPO" --token "$REG_TOKEN" --unattended
   note "installing the systemd service (needs sudo):"
-  sudo ./svc.sh install "$USER" && sudo ./svc.sh start
+  sudo ./svc.sh install "$RUNNER_USER" && sudo ./svc.sh start
 fi
 
 note "== 5/5 verification"

@@ -4,9 +4,9 @@
 # and cannot read ~/.ssh/authorized_keys. Kerberos does work, so this
 # workflow kinits from a keytab and logs in unattended, on a schedule.
 #
-# CREDENTIAL: /data/vkhlaisu/ci-secrets/cmst0.keytab, VM only, mode 400,
-# never in this repo. Uses the cmst0 service account (no sudo) instead of
-# a personal keytab, to avoid implying passwordless root.
+# CREDENTIAL: cmst0.keytab in the runner user's CI secrets dir, VM only,
+# mode 400, never in this repo. Uses the cmst0 service account (no sudo)
+# instead of a personal keytab, to avoid implying passwordless root.
 #
 # No pull_request trigger: any job on this runner can read the keytab, so
 # a stranger's PR must never trigger it. Manual and scheduled runs only.
@@ -37,7 +37,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  KEYTAB: /data/vkhlaisu/ci-secrets/cmst0.keytab
+  # empty means the script default, /data/<runner user>/ci-secrets
+  WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '' }}
   PRINCIPAL: cmst0@CERN.CH
   T0_HOSTS: 'vocms0500.cern.ch vocms05012.cern.ch'
 
@@ -54,19 +55,21 @@ jobs:
         env:
           SIMULATE: ${{ inputs.simulate_failure }}
         run: |
-          keytab="$KEYTAB"
+          keytab_dir="${WMCI_SECRETS_DIR:-/data/$(id -un)/ci-secrets}"
+          keytab="$keytab_dir/cmst0.keytab"
           if [ "${SIMULATE:-no}" = "bad-keytab" ]; then
-            keytab=/data/vkhlaisu/ci-secrets/this-file-does-not-exist.keytab
+            keytab="$keytab_dir/this-file-does-not-exist.keytab"
             echo "simulate_failure=bad-keytab: looking for $keytab instead"
           fi
           if [ ! -r "$keytab" ]; then
             echo "::error::keytab not readable at $keytab"
-            echo "The runner runs as vkhlaisu, so the file must be owned by"
-            echo "vkhlaisu and readable by them (mode 400 is fine)."
+            echo "The runner user must own the file and be able to read it"
+            echo "(mode 400 is fine)."
             exit 1
           fi
           # -k lists account names and key versions only, no secret material.
           klist -k "$keytab"
+          echo "KEYTAB=$keytab" >> "$GITHUB_ENV"
 
       - name: Get a Kerberos ticket for cmst0
         run: |

@@ -8,13 +8,13 @@ nosetests summary, and pycodestyle
 Input files are located in the directory of script execution
 
 Environment Variables:
-    JENKINS_JINJA_TEMPLATE_PATH: Location of Jinja2 Templates
+    WMCI_TEMPLATE_PATH: Location of Jinja2 Templates
     DMWMBOT_TOKEN: GitHub token
     CODE_REPO: Code repository name
     WMCORE_REPO: Project name
-    ghprbPullId (optional): PR ID from Jenkins GitHub Pull Request Builder
+    PR_NUMBER (optional): PR ID from the CI
     TargetIssueID (optional)
-    BUILD_URL: Jenkins build URL; for report location
+    BUILD_URL: build URL; for report location
 
 Input Files:
     pylintpy3Report.json: pylint report
@@ -239,7 +239,7 @@ def reportToGithub(py3UnitTestSummary,
     """
     Builds Report and GitHub Issue message
     """
-    # Build GitHub Jenkins Results
+    # Build GitHub results
     try:
         gh = Github(os.environ['DMWMBOT_TOKEN'])
     except KeyError:
@@ -251,8 +251,8 @@ def reportToGithub(py3UnitTestSummary,
 
     issueID = None
 
-    if 'ghprbPullId' in os.environ:
-        issueID = os.environ['ghprbPullId']
+    if 'PR_NUMBER' in os.environ:
+        issueID = os.environ['PR_NUMBER']
         mode = 'PR'
     elif 'TargetIssueID' in os.environ:
         issueID = os.environ['TargetIssueID']
@@ -260,13 +260,12 @@ def reportToGithub(py3UnitTestSummary,
 
     repo = gh.get_repo(repoName)
     issue = repo.get_issue(int(issueID))
-    reportURL = os.environ['BUILD_URL'].replace('jenkins/job',
-                                                'jenkins/view/All/job') + 'artifact/artifacts/PullRequestReport.html'
+    reportURL = os.environ['BUILD_URL'] + 'artifact/artifacts/PullRequestReport.html'
 
     statusMap = {False: {'ghStatus': 'success', 'readStatus': 'succeeded'},
                  True: {'ghStatus': 'failure', 'readStatus': 'failed'}, }
 
-    message = 'Jenkins results:\n'
+    message = 'GitHub Actions results:\n'
 
     if py3UnitTestSummary:  # Most of the repositories do not yet have python3 unit tests
         message += (
@@ -337,20 +336,20 @@ if __name__ == '__main__':
     ### main code
     # load jinja templates
     try:
-        templatePathEnv = os.environ["JENKINS_JINJA_TEMPLATE_PATH"]
+        templatePathEnv = os.environ["WMCI_TEMPLATE_PATH"]
         templatePath = Path(templatePathEnv)
         if not templatePath.exists():
             raise FileNotFoundError(f'{templatePath} not found')
         if not templatePath.is_dir():
             raise NotADirectoryError(f'{templatePath} is not a directory')
     except KeyError:
-        print('JENKINS_JINJA_TEMPLATE_PATH not defined')
+        print('WMCI_TEMPLATE_PATH not defined')
         raise
 
     templateLoader = jinja2.FileSystemLoader(searchpath=templatePath)
     templateEnv = jinja2.Environment(loader=templateLoader, trim_blocks=True, lstrip_blocks=True)
 
-    # Build Python3 Pylint report from jenkins artifacts (NOTE: most of the projects don't have it yet)
+    # Build Python3 Pylint report from CI artifacts (NOTE: most of the projects don't have it yet)
     failedPylintPy3, pylintSummaryHTMLPy3, pylintReportPy3, pylintSummaryPy3 = buildPylintReport(templateEnv,
                                                                                                  "pylintpy3Report.json")
     # Build pycodestyleReport

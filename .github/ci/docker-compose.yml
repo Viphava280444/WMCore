@@ -1,12 +1,12 @@
 # The CI test stack: MariaDB + CouchDB + a test container per stack.
-# Derived from WMCore-Test-Base/docker-compose.yml (dmwm/WMCore-Jenkins
-# @ b203d873) with the fork's runner settings merged in - one file instead
+# Derived from the previous CI's WMCore-Test-Base/docker-compose.yml
+# @ b203d873 with the fork's runner settings merged in - one file instead
 # of base + override.
 #
 # Parallel stacks: mariadb owns the stack's network namespace, couchdb and
 # the test container join it, so several stacks never collide on ports.
 # Per-stack env: COMPOSE_PROJECT_NAME, HOST_MOUNT_DIR, WMCI_MDB_DATA_DIR,
-# WMCI_NET, WMCI_PROXY, WMCI_CI_DIR, WMCORE_JENKINS_HOST_DIR.
+# WMCI_NET, WMCI_PROXY, WMCI_CI_DIR, WMCI_SCRIPTS_DIR.
 
 # generated passwd/group (setup-users.sh) so containers resolve the sssd
 # runner account; scripts dir is the repo checkout
@@ -18,7 +18,9 @@ x-volumes: &named
   - &sudoersd "/etc/sudoers.d:/etc/sudoers.d:ro"
   - &certs "${HOST_MOUNT_DIR}/certs:/data/certs"
   - &stack-tmp "${HOST_MOUNT_DIR}/tmp:/tmp"
-  - &scripts "${WMCORE_JENKINS_HOST_DIR:?}:/home/cmsbld/WMCore-Jenkins:ro"
+  # mount target dictated by the container image: its baked-in entrypoint
+  # copies TestScripts/ and ContainerScripts/ out of this exact path.
+  - &scripts "${WMCI_SCRIPTS_DIR:?}:/home/cmsbld/WMCore-Jenkins:ro"
 
 # the test containers join their stack's namespace and reach the internet
 # through the stack's host proxy (bridge containers have no direct egress
@@ -134,33 +136,36 @@ services:
       - "${WMCI_CI_DIR:-.}/ci-shim.py:/wmci/ci-shim.py:ro"
       - *stack-tmp
 
-  # PR mode: test-wmcorepy3.sh merges the PR (ghprbPullId) onto the newest
+  # PR mode: test-wmcorepy3.sh merges the PR (PR_NUMBER) onto the newest
   # baseline tag before testing
   wmcore-pr-test:
     <<: *test-common
     environment:
       <<: *proxy-env
-      ghprbPullId: ${ghprbPullId}
-      ghprbTargetBranch: ${ghprbTargetBranch}
+      PR_NUMBER: ${PR_NUMBER}
+      TARGET_BRANCH: ${TARGET_BRANCH}
       MY_ID: ${MY_ID}
       MY_GROUP: ${MY_GROUP}
       BUILD_ID: ${BUILD_ID}
-      WMCORE_JENKINS_ORG: ${WMCORE_JENKINS_ORG}
-      WMCORE_JENKINS_REF: ${WMCORE_JENKINS_REF}
+      WMCORE_ORG: ${WMCORE_ORG}
       DMWMBOT_TOKEN: ${DMWMBOT_TOKEN}
+      # optional extra PYTHONPATH entry on the runner VM; test-wmcorepy3.sh
+      # prepends it when set, and leaves PYTHONPATH alone when empty
+      WMCI_EXTRA_PYTHONPATH: ${WMCI_EXTRA_PYTHONPATH:-}
+      WMA_CONFIG_FILE: ${WMA_CONFIG_FILE:-}
     volumes: *test-volumes
 
-  # baseline mode: no ghprbPullId, plain master
+  # baseline mode: no PR_NUMBER, plain master
   wmcore-unittests:
     <<: *test-common
     environment:
       <<: *proxy-env
       MY_ID: ${MY_ID}
       MY_GROUP: ${MY_GROUP}
-      WMA_CONFIG_FILE: ${WMA_CONFIG_FILE}
+      WMA_CONFIG_FILE: ${WMA_CONFIG_FILE:-}
       BUILD_ID: ${BUILD_ID}
-      WMCORE_JENKINS_ORG: ${WMCORE_JENKINS_ORG}
-      WMCORE_JENKINS_REF: ${WMCORE_JENKINS_REF}
+      WMCORE_ORG: ${WMCORE_ORG}
+      WMCI_EXTRA_PYTHONPATH: ${WMCI_EXTRA_PYTHONPATH:-}
     volumes: *test-volumes
 
   # lint needs no databases, so it keeps host networking
@@ -169,12 +174,11 @@ services:
     tty: true
     network_mode: "host"
     environment:
-      - ghprbPullId=${ghprbPullId}
-      - ghprbTargetBranch=${ghprbTargetBranch}
+      - PR_NUMBER=${PR_NUMBER}
+      - TARGET_BRANCH=${TARGET_BRANCH}
       - MY_ID
       - MY_GROUP
-      - WMCORE_JENKINS_ORG
-      - WMCORE_JENKINS_REF
+      - WMCORE_ORG
       - BUILD_ID
     command: ["/bin/bash"]
     volumes:

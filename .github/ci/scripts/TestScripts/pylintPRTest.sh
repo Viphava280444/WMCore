@@ -2,12 +2,12 @@
 
 WORKDIR=/home/cmsbld
 
-if [ -z "$ghprbPullId" -o -z "$ghprbTargetBranch" ]; then
-  echo "Not all necessary environment variables set: ghprbPullId, ghprbTargetBranch"
+if [ -z "$PR_NUMBER" -o -z "$TARGET_BRANCH" ]; then
+  echo "Not all necessary environment variables set: PR_NUMBER, TARGET_BRANCH"
   exit 1
 fi
 
-echo "Executing Pylint for PR ID $ghprbPullId and target branch $ghprbTargetBranch"
+echo "Executing Pylint for PR ID $PR_NUMBER and target branch $TARGET_BRANCH"
 
 # Setup the environment
 echo "Sourcing a python3 unittest environment"
@@ -19,23 +19,23 @@ pushd $WORKDIR/WMCore
 export PYTHONPATH=`pwd`/test/python:`pwd`/src/python:$PYTHONPATH
 
 # Figure out the one commit we are interested in and what happens to the repo if we were to merge it
-git config remote.origin.url https://github.com/dmwm/WMCore.git
-git fetch origin pull/${ghprbPullId}/merge:PR_MERGE
+git config remote.origin.url "https://github.com/${WMCORE_ORG:-dmwm}/WMCore.git"
+git fetch origin pull/${PR_NUMBER}/merge:PR_MERGE
 export COMMIT=`git rev-parse "PR_MERGE^{commit}"`
-git checkout ${ghprbTargetBranch}
+git checkout ${TARGET_BRANCH}
 git pull
 
 # Which python files changed?
-git diff --name-only  ${ghprbTargetBranch}..${COMMIT} > allChangedFiles.txt
+git diff --name-only  ${TARGET_BRANCH}..${COMMIT} > allChangedFiles.txt
 $WORKDIR/ContainerScripts/IdentifyPythonFiles.py allChangedFiles.txt > changedFiles.txt
 
 echo "Printing Pylint version"
 pylint --version
 
 # Get pylint report for master
-git checkout -f $ghprbTargetBranch
+git checkout -f $TARGET_BRANCH
 echo "{}" > pylintReport.json
-echo "*** Running Pylint on the changed files against the $ghprbTargetBranch"
+echo "*** Running Pylint on the changed files against the $TARGET_BRANCH"
 while read name; do
   pylint --evaluation='10.0 - ((float(5 * error + warning) / statement) * 10)'  --rcfile standards/.pylintrc --msg-template='{path}:{line}: [{msg_id}({symbol}), {obj}] {msg}'  $name > pylint.out || true
   $WORKDIR/ContainerScripts/AggregatePylint.py base

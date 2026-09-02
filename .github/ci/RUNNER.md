@@ -1,10 +1,9 @@
 # Setting up a new self-hosted runner
 
-Everything the CI executes lives in this repository - the original
-test scripts are vendored under `.github/ci/scripts/` (byte-
-identical, provenance in its README). A new VM provides only docker, the
-runner itself, and optionally real grid credentials. One script prepares
-all of it.
+Everything the CI executes lives in this repository - the test scripts are
+vendored under `.github/ci/scripts/` and maintained there (provenance in
+its README). A new VM provides only docker, the runner itself, and
+optionally real grid credentials. One script prepares all of it.
 
 ## Quick start
 
@@ -43,14 +42,25 @@ the script writes a README there naming the exact files. The rucio
 account's DN registrations (e.g. `wma_test`) are admin requests, not
 files.
 
+The same secrets dir also holds `cmst0.keytab`, which only the Tier-0 SSH
+check (`t0-ssh-check.yml`) reads; the test workflows ignore it.
+
 ## Paths and multiple runners
 
 The scripts come from the repo checkout, so no script path exists on the
 VM at all. The only VM path the workflows know is the optional secrets
 dir; a runner with a different one sets the repo Actions variable
 `WMCI_SECRETS_DIR` (Settings > Secrets and variables > Actions >
-Variables). Variables are repo-wide, so a fleet of runners should use the
-same path convention on every VM.
+Variables). That one variable moves the whole dir - the grid pair, the
+rucio account file and the Tier-0 keytab all have to live under the new
+path. Variables are repo-wide, so a fleet of runners should use the same
+path convention on every VM.
+
+A runner that has an extra library directory to put on the test
+containers' `PYTHONPATH` (the previous CI used one for
+`FWCore.ParameterSet.Config`) names it in the Actions variable
+`WMCI_EXTRA_PYTHONPATH`. Unset, `PYTHONPATH` is left alone. It must be
+the same on baseline and PR runs, which repo-wide variables guarantee.
 
 ## Known traps
 

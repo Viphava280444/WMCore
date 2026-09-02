@@ -1,11 +1,13 @@
-# WMCore baseline test run, migrated from Jenkins.
+# WMCore baseline test run, migrated from the previous CI.
 #
-# It does two things:
-#   - Tags master as JENKINS_<timestamp>. PR runs merge the PR onto the newest
-#     JENKINS_* tag, so this tag pins the base commit the baseline tested.
+# It does two things, in this order:
 #   - Runs the full unit test suite on master and keeps the nosetests XML.
 #     The PR report job downloads them from the latest successful run of this
 #     workflow as its baseline.
+#   - Then, only if those tests passed, tags the tested commit as
+#     BASELINE_<timestamp>. PR runs merge the PR onto the newest BASELINE_*
+#     tag, so this tag pins the base commit the baseline tested - and a failed
+#     baseline must not leave a newest tag whose XMLs no PR run can compare to.
 #
 # Why: PullRequestReport.py only flags tests that CHANGED between baseline and
 # PR. Baseline and PR must run in the same environment, so environment-caused
@@ -13,7 +15,8 @@
 #
 # The 14 slices run as three isolated stacks in parallel, the same layout as
 # the unit-tests job of wmcore-pr-test.yml. Each slice runs once, no retry.
-# Old JENKINS_* tags are pruned after 7 days.
+# Old BASELINE_* tags are pruned after 7 days. Tags left over from the
+# previous CI use a different prefix and are deleted by hand at cutover.
 #
 # GitHub only fires cron from the default branch, so the schedule is inactive
 # on a feature branch; use workflow_dispatch there.
@@ -26,7 +29,7 @@ on:
     - cron: '21 2,13 * * *'
 
 permissions:
-  contents: write   # push and prune the JENKINS_<timestamp> tags
+  contents: write   # push and prune the BASELINE_<timestamp> tags
 
 # Shared with the unit-tests job of wmcore-pr-test.yml. A test run uses the
 # whole VM, so baseline and PR runs must queue instead of overlapping.
@@ -40,61 +43,79 @@ env:
   WMA_TAG: '2.3.3'
   COUCH_TAG: '3.2.2'
   MDB_TAG: '10.6.19'
-  # This compose service takes no ghprbPullId, which keeps
+  # This compose service takes no PR_NUMBER, which keeps
   # test-wmcorepy3.sh in plain-master mode: no PR merge.
   TEST_SERVICE: 'wmcore-unittests'
   SLICES: '12'
   WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
   BUILD_ID: ${{ github.run_id }}
   # compose interpolates these for other services; empty on baseline runs
-  ghprbPullId: ''
-  ghprbTargetBranch: ''
+  PR_NUMBER: ''
+  TARGET_BRANCH: ''
   WMA_CONFIG_FILE: ''
   DMWMBOT_TOKEN: ''
-  WMCORE_JENKINS_ORG: dmwm
-  WMCORE_JENKINS_REF: main
+  # the container entrypoint and the vendored scripts clone this owner's WMCore
+  WMCORE_ORG: ${{ github.repository_owner }}
   # vendored scripts (.github/ci/scripts), mounted into the containers
-  WMCORE_JENKINS_HOST_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/scripts
-  # optional real credentials on the runner VM; see .github/ci/RUNNER.md
-  WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '/data/vkhlaisu/ci-secrets' }}
+  WMCI_SCRIPTS_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/scripts
+  # optional real credentials on the runner VM; empty means the script default
+  # (see .github/ci/RUNNER.md)
+  WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '' }}
+  # optional extra PYTHONPATH entry inside the test containers (an
+  # additional-library dir on the runner VM); empty leaves PYTHONPATH alone.
+  # Must match wmcore-pr-test.yml: same environment on both sides.
+  WMCI_EXTRA_PYTHONPATH: ${{ vars.WMCI_EXTRA_PYTHONPATH || '' }}
 
 jobs:
-  # Tag format must stay JENKINS_YYYYmmddHHMMSS: other jobs match that pattern.
+  # Tag format must stay BASELINE_YYYYmmddHHMMSS: other jobs match that pattern.
+  #
+  # Runs AFTER the tests, and only when they passed. test-wmcorepy3.sh merges
+  # PRs onto the NEWEST BASELINE_* tag, while wmcore-pr-report.yml compares
+  # against the latest SUCCESSFUL baseline run's XMLs. Tagging first would let
+  # a failed baseline leave a newest tag with no matching XMLs, so PRs would be
+  # merged onto a base the comparison never covered. The unit tests need no
+  # tag - baseline mode passes no PR_NUMBER, so the tag is read only by PR runs.
   tag-baseline:
+    needs: unit-tests
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      - name: Checkout master
+      - name: Checkout the tested commit
         uses: actions/checkout@v4
         with:
-          ref: master
+          ref: ${{ needs.unit-tests.outputs.baseline-sha }}
 
       - name: Tag baseline
+        env:
+          BASELINE_SHA: ${{ needs.unit-tests.outputs.baseline-sha }}
         run: |
-          TAG="JENKINS_$(date -u +%Y%m%d%H%M%S)"
-          git tag "$TAG"
+          TAG="BASELINE_$(date -u +%Y%m%d%H%M%S)"
+          git tag "$TAG" "$BASELINE_SHA"
           git push origin "$TAG"
-          echo "Pushed baseline tag $TAG at commit $(git rev-parse HEAD)"
+          echo "Pushed baseline tag $TAG at commit $BASELINE_SHA"
 
-      # Never delete a tag that does not match JENKINS_<14 digits>.
+      # Never delete a tag that does not match BASELINE_<14 digits>.
       - name: Prune baseline tags older than 7 days
         run: |
           cutoff=$(date -u -d '7 days ago' +%Y%m%d%H%M%S)
-          git ls-remote --tags origin 'JENKINS_*' | awk '{print $2}' | sed 's|^refs/tags/||' \
-            | grep -E '^JENKINS_[0-9]{14}$' | while read -r tag; do
-              stamp=${tag#JENKINS_}
+          git ls-remote --tags origin 'BASELINE_*' | awk '{print $2}' | sed 's|^refs/tags/||' \
+            | grep -E '^BASELINE_[0-9]{14}$' | while read -r tag; do
+              stamp=${tag#BASELINE_}
               if [ "$stamp" -lt "$cutoff" ]; then
                 git push --delete origin "$tag" && echo "Pruned old baseline tag $tag"
               fi
             done
 
-  # Same three-stack layout as the PR unit tests, but no ghprbPullId, so the
+  # Same three-stack layout as the PR unit tests, but no PR_NUMBER, so the
   # test script tests plain master. The slice groups are the runtime-balanced
   # 3-way split: stack 1 has the largest group, stack 3 the smallest.
   unit-tests:
-    needs: tag-baseline
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
+    outputs:
+      # the commit the stacks synced their clone to; tag-baseline tags THIS,
+      # not whatever master has become by the time the tests finish
+      baseline-sha: ${{ steps.base.outputs.sha }}
     env:
       STACK1_SLICES: '1 2 5 10 12'
       STACK2_SLICES: '0 6 7 8 13'
@@ -106,6 +127,16 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: wmcore-src
+
+      # the commit under test: the stacks hard-sync their clone to origin/master
+      # moments after this, so this SHA is the one the tag must name
+      - name: Resolve the master commit under test
+        id: base
+        run: |
+          sha=$(git -C wmcore-src ls-remote origin master | cut -f1)
+          case "$sha" in ''|*[!0-9a-f]*) echo "could not resolve origin/master"; exit 1;; esac
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Baseline commit under test: $sha"
 
       - name: Runtime environment
         run: |
@@ -198,10 +229,9 @@ jobs:
             sleep 2
           done
           [ -n "$chowned" ] || { echo "[S$K] /home/cmsbld/etc still not writable after 120s"; docker compose logs "$TEST_SERVICE" | tail -n 25; exit 1; }
-          # Fork only: the unchanged scripts hardcode dmwm/WMCore, so make git
-          # resolve it to this fork. DELETE this when moving upstream.
-          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
-            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+          # Identity and pull/safe-directory settings for the in-container git;
+          # the repo owner itself comes from WMCORE_ORG.
+          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig "$TEST_SERVICE" bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
             # modern git refuses a divergent pull without a strategy; give it
@@ -222,10 +252,11 @@ jobs:
           for S in $SLICE_LIST; do
             s0=$(date +%s)
             ok=0
-            # single attempt, no retry: the Jenkins baseline never retried
+            # single attempt, no retry: the previous CI's baseline never retried
             echo "[S$K] baseline: testing slice $S of $SLICES for build $BUILD_ID"
             if docker compose exec -T -u "$MY_ID" \
                  -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
+                 -e WMCORE_ORG="$WMCORE_ORG" \
                  -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                  -e WMCORE_TEST_EXIT_ALARM=10 \
                  -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
