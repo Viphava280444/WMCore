@@ -1,7 +1,7 @@
 # Setting up a new self-hosted runner
 
-Everything the CI executes lives in this repository - the Jenkins-era
-test scripts are vendored under `.github/ci/jenkins-scripts/` (byte-
+Everything the CI executes lives in this repository - the original
+test scripts are vendored under `.github/ci/scripts/` (byte-
 identical, provenance in its README). A new VM provides only docker, the
 runner itself, and optionally real grid credentials. One script prepares
 all of it.
