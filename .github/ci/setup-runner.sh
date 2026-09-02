@@ -3,7 +3,7 @@
 #
 # Run as the future runner user on the VM. Idempotent: safe to re-run.
 # Everything the CI executes lives in this repo (the Jenkins-era scripts
-# are vendored under .github/ci/wmcore-jenkins); the only hand step left is
+# are vendored under .github/ci/jenkins-scripts); the only hand step left is
 # pasting a runner registration token from the repo's Settings page.
 #
 # Usage:
