@@ -88,11 +88,12 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
-      # scripts always come from master, never from the PR
-      - name: Checkout CI scripts from master
+      # own-ref checkout: this job only runs for same-repo PRs and
+      # dispatches, both trusted - and the PR that vendors these scripts
+      # must be able to test itself before they exist on master
+      - name: Checkout CI scripts
         uses: actions/checkout@v4
         with:
-          ref: master
           path: wmcore-src
 
       - name: Report tests started (unchanged PullRequestTestBegin.py)
