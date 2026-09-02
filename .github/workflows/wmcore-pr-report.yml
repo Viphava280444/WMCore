@@ -38,7 +38,7 @@ env:
   # appends a harmless fragment
   BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
   # VM-local clone of the private dmwm/WMCore-Jenkins
-  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
+  WMCORE_JENKINS_HOST_DIR: ${{ vars.WMCORE_JENKINS_HOST_DIR || '/data/vkhlaisu/WMCore-Jenkins' }}
 
 jobs:
   report:
