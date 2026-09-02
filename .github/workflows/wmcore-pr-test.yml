@@ -25,6 +25,8 @@
 #   2. the 'safe-to-test' label, set by a maintainer after reading the diff
 #      (the unit-tests guard checks it).
 # Fallback: a dispatch with pr_number tests any PR with full permissions.
+# A collaborator can also comment "gha test please" on the PR - the
+# wmcore-pr-comment-trigger.yml workflow makes that dispatch.
 
 name: WMCore PR tests
 
