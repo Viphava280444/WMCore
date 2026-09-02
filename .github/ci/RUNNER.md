@@ -1,9 +1,10 @@
 # Setting up a new self-hosted runner
 
-Everything the CI executes lives in this repository, except two things a
-new VM provides once: a clone of the private `dmwm/WMCore-Jenkins` repo
-(the unchanged Jenkins-era test scripts) and, optionally, real grid
-credentials. One script prepares all of it.
+Everything the CI executes lives in this repository - the Jenkins-era
+test scripts are vendored under `.github/ci/wmcore-jenkins/` (byte-
+identical, provenance in its README). A new VM provides only docker, the
+runner itself, and optionally real grid credentials. One script prepares
+all of it.
 
 ## Quick start
 
@@ -25,7 +26,6 @@ idempotent: when it stops on a missing prerequisite, fix that and re-run.
 | docker + compose v2 | test containers | runner user in `docker` group |
 | /dev/shm, 4 GB+ | MariaDB data on RAM | per-stack dirs, auto-cleaned |
 | /etc/grid-security/certificates | CA bundle mount | standard on CERN VMs |
-| WMCore-Jenkins clone | Jenkins-era scripts | private repo, script clones it |
 | python3, git, curl, openssl | glue | stock on AlmaLinux |
 
 No NAT or firewall change is needed: containers run on a private bridge
@@ -45,11 +45,12 @@ files.
 
 ## Paths and multiple runners
 
-The workflows default to the original VM's paths. A runner with different
-paths sets two repo Actions variables (Settings > Secrets and variables >
-Actions > Variables): `WMCORE_JENKINS_HOST_DIR` and `WMCI_SECRETS_DIR`.
-These are repo-wide, so a fleet of runners should use the same path
-convention on every VM.
+The scripts come from the repo checkout, so no script path exists on the
+VM at all. The only VM path the workflows know is the optional secrets
+dir; a runner with a different one sets the repo Actions variable
+`WMCI_SECRETS_DIR` (Settings > Secrets and variables > Actions >
+Variables). Variables are repo-wide, so a fleet of runners should use the
+same path convention on every VM.
 
 ## Known traps
 

@@ -2,19 +2,17 @@
 # Prepare a new self-hosted runner VM for the WMCore CI.
 #
 # Run as the future runner user on the VM. Idempotent: safe to re-run.
-# Everything the CI executes lives in this repo or in the WMCore-Jenkins
-# clone this script creates; the only hand step left is pasting a runner
-# registration token from the repo's Settings > Actions > Runners page.
+# Everything the CI executes lives in this repo (the Jenkins-era scripts
+# are vendored under .github/ci/wmcore-jenkins); the only hand step left is
+# pasting a runner registration token from the repo's Settings page.
 #
 # Usage:
 #   setup-runner.sh --repo <owner/repo> [--token <registration-token>]
-#     [--jenkins-dir /data/$USER/WMCore-Jenkins]
 #     [--secrets-dir /data/$USER/ci-secrets]
 #     [--runner-dir  /data/$USER/actions-runner]
 
 REPO=""
 REG_TOKEN=""
-JENKINS_DIR="/data/$USER/WMCore-Jenkins"
 SECRETS_DIR="/data/$USER/ci-secrets"
 RUNNER_DIR="/data/$USER/actions-runner"
 
@@ -22,7 +20,6 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --repo)        REPO="$2"; shift 2;;
     --token)       REG_TOKEN="$2"; shift 2;;
-    --jenkins-dir) JENKINS_DIR="$2"; shift 2;;
     --secrets-dir) SECRETS_DIR="$2"; shift 2;;
     --runner-dir)  RUNNER_DIR="$2"; shift 2;;
     *) echo "unknown option: $1"; exit 1;;
@@ -34,7 +31,7 @@ fail=0
 note() { printf '%s\n' "$*"; }
 need() { command -v "$1" >/dev/null || { note "MISSING: $1"; fail=1; }; }
 
-note "== 1/6 host prerequisites"
+note "== 1/5 host prerequisites"
 need git; need python3; need openssl; need curl; need docker
 if docker compose version >/dev/null 2>&1; then
   note "docker compose: $(docker compose version --short 2>/dev/null)"
@@ -51,7 +48,7 @@ if [ ! -d /etc/grid-security/certificates ]; then
 fi
 [ $fail -eq 0 ] || { note "install the missing tools first, then re-run"; exit 1; }
 
-note "== 2/6 docker access"
+note "== 2/5 docker access"
 if docker ps >/dev/null 2>&1; then
   note "docker works for user $USER"
 else
@@ -63,19 +60,7 @@ else
   exit 1
 fi
 
-note "== 3/6 WMCore-Jenkins clone at $JENKINS_DIR"
-if [ -d "$JENKINS_DIR/.git" ]; then
-  note "already cloned ($(git -C "$JENKINS_DIR" rev-parse --short HEAD))"
-else
-  note "cloning the PRIVATE dmwm/WMCore-Jenkins - your git auth must have access"
-  git clone https://github.com/dmwm/WMCore-Jenkins.git "$JENKINS_DIR" \
-    || { note "clone failed - set up a PAT (git credential) with dmwm access and re-run"; exit 1; }
-fi
-for f in TestScripts/test-wmcorepy3.sh ContainerScripts/PullRequestReport.py WMCore-PR-test/setup-users.sh; do
-  [ -f "$JENKINS_DIR/$f" ] || { note "MISSING in clone: $f"; exit 1; }
-done
-
-note "== 4/6 optional credentials dir at $SECRETS_DIR"
+note "== 3/5 optional credentials dir at $SECRETS_DIR"
 if [ -f "$SECRETS_DIR/usercert.pem" ]; then
   note "grid certificate pair present - credentialed mode"
 else
@@ -91,7 +76,7 @@ EOF
   note "skeleton created (dummy-cert mode until you add real files - see its README)"
 fi
 
-note "== 5/6 actions runner at $RUNNER_DIR"
+note "== 4/5 actions runner at $RUNNER_DIR"
 if [ -f "$RUNNER_DIR/.runner" ]; then
   note "runner already configured"
 else
@@ -108,7 +93,7 @@ else
   sudo ./svc.sh install "$USER" && sudo ./svc.sh start
 fi
 
-note "== 6/6 verification"
+note "== 5/5 verification"
 pid=$(pgrep -f Runner.Listener | head -1 || true)
 if [ -n "$pid" ]; then
   dgid=$(getent group docker | cut -d: -f3)
@@ -122,8 +107,6 @@ else
   note "runner process not found - start the service and re-check"
 fi
 note ""
-note "Done. If your paths differ from the workflow defaults, set repo Actions"
-note "variables (Settings > Secrets and variables > Actions > Variables):"
-note "  WMCORE_JENKINS_HOST_DIR=$JENKINS_DIR"
-note "  WMCI_SECRETS_DIR=$SECRETS_DIR"
+note "Done. If the secrets dir differs from the workflow default, set the"
+note "repo Actions variable WMCI_SECRETS_DIR=$SECRETS_DIR"
 note "Then dispatch the 'WMCore baseline' workflow once and watch it go green."

@@ -38,7 +38,7 @@ env:
   # appends a harmless fragment
   BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
   # VM-local clone of the private dmwm/WMCore-Jenkins
-  WMCORE_JENKINS_HOST_DIR: ${{ vars.WMCORE_JENKINS_HOST_DIR || '/data/vkhlaisu/WMCore-Jenkins' }}
+  WMCORE_JENKINS_HOST_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/wmcore-jenkins
 
 jobs:
   report:
@@ -48,6 +48,13 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
+      # the vendored Jenkins-era scripts; always master's copy, never PR code
+      - name: Checkout CI scripts from master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: wmcore-src
+
       # Which test run, which PR. On dispatch both come from inputs; on
       # workflow_run the PR number comes from the pr-context artifact, since
       # the event payload omits fork PRs (validated as in the header).
