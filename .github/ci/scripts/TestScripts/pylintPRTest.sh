@@ -25,8 +25,9 @@ export COMMIT=`git rev-parse "PR_MERGE^{commit}"`
 git checkout ${TARGET_BRANCH}
 git pull
 
-# Which python files changed?
-git diff --name-only  ${TARGET_BRANCH}..${COMMIT} > allChangedFiles.txt
+# Which python files changed? CI tooling under .github is not product
+# code, so the style gate skips it.
+git diff --name-only  ${TARGET_BRANCH}..${COMMIT} | grep -v '^\.github/' > allChangedFiles.txt
 $WORKDIR/ContainerScripts/IdentifyPythonFiles.py allChangedFiles.txt > changedFiles.txt
 
 echo "Printing Pylint version"
