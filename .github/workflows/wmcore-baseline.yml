@@ -111,7 +111,7 @@ jobs:
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
           echo "HOST_MOUNT_DIR=$GITHUB_WORKSPACE/ci-workspace" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
           # The stack runs on its own bridge network with no NAT, so container
           # egress must go through the host proxy below.
           echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"

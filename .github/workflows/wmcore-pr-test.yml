@@ -71,7 +71,7 @@ env:
   DMWMBOT_TOKEN: ''
   WMCORE_JENKINS_ORG: dmwm
   WMCORE_JENKINS_REF: main
-  # Jenkins-era scripts vendored in this repo, mounted by the override file
+  # vendored scripts (.github/ci/scripts), mounted into the containers
   WMCORE_JENKINS_HOST_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/scripts
   # optional real credentials on the runner VM; see .github/ci/RUNNER.md
   WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '/data/vkhlaisu/ci-secrets' }}
@@ -141,7 +141,7 @@ jobs:
           echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
           echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"
           docker version
           docker compose version
