@@ -23,7 +23,8 @@ on:
 
 permissions:
   actions: write         # dispatch wmcore-pr-test.yml
-  issues: write          # acknowledge the comment with a reaction
+  issues: write          # react to comments on plain issues
+  pull-requests: write   # react to comments on PRs
   contents: read
 
 jobs:
@@ -79,4 +80,5 @@ jobs:
         run: |
           gh api -X POST \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-            -f content=rocket
+            -f content=rocket \
+            || echo "::warning::could not add the reaction - dispatch already done"
