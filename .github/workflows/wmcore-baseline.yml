@@ -53,8 +53,8 @@ env:
   DMWMBOT_TOKEN: ''
   WMCORE_JENKINS_ORG: dmwm
   WMCORE_JENKINS_REF: main
-  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file.
-  WMCORE_JENKINS_HOST_DIR: ${{ vars.WMCORE_JENKINS_HOST_DIR || '/data/vkhlaisu/WMCore-Jenkins' }}
+  # Jenkins-era scripts vendored in this repo, mounted by the override file
+  WMCORE_JENKINS_HOST_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/wmcore-jenkins
   # optional real credentials on the runner VM; see .github/ci/RUNNER.md
   WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '/data/vkhlaisu/ci-secrets' }}
 
