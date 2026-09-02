@@ -1,7 +1,11 @@
 # Comment trigger, the Jenkins "test this please" twin.
 #
+# The sentence is deliberately DIFFERENT from the Jenkins one, so if this
+# workflow ever runs beside Jenkins upstream, one comment can never start
+# both systems.
+#
 # A collaborator with write access comments the sentence
-#     test this please
+#     gha test please
 # on any PR and this job dispatches the WMCore PR tests for that PR
 # (wmcore-pr-test.yml with pr_number, the proven dispatch door). The
 # report workflow then posts the comment and statuses as usual.
@@ -29,8 +33,8 @@ jobs:
     if: >-
       github.event.issue.pull_request != null &&
       github.event.comment.user.type != 'Bot' &&
-      (contains(github.event.comment.body, 'test this please') ||
-       contains(github.event.comment.body, 'Test this please'))
+      (contains(github.event.comment.body, 'gha test please') ||
+       contains(github.event.comment.body, 'GHA test please'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -45,7 +49,7 @@ jobs:
         run: |
           # a line of the comment must be exactly the sentence (case
           # insensitive, optional punctuation)
-          if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*test this please[[:space:]!.]*$'; then
+          if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*gha test please[[:space:]!.]*$'; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
           else
             echo "comment mentions the phrase but not as its own line - ignoring"
