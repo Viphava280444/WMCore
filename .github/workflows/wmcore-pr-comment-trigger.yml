@@ -1,0 +1,78 @@
+# Comment trigger, the Jenkins "test this please" twin.
+#
+# A collaborator with write access comments the sentence
+#     test this please
+# on any PR and this job dispatches the WMCore PR tests for that PR
+# (wmcore-pr-test.yml with pr_number, the proven dispatch door). The
+# report workflow then posts the comment and statuses as usual.
+#
+# Safety: runs on a hosted runner, never checks out or executes PR code,
+# and the comment body is compared as data, never evaluated. Only the
+# commenter's repo permission decides; an unauthorized comment is ignored
+# without failing the job.
+
+name: PR comment trigger
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write         # dispatch wmcore-pr-test.yml
+  issues: write          # acknowledge the comment with a reaction
+  contents: read
+
+jobs:
+  trigger:
+    # cheap pre-filter; the case-insensitive match and the permission
+    # check below are the real gates
+    if: >-
+      github.event.issue.pull_request != null &&
+      github.event.comment.user.type != 'Bot' &&
+      (contains(github.event.comment.body, 'test this please') ||
+       contains(github.event.comment.body, 'Test this please'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUM: ${{ github.event.issue.number }}
+      COMMENTER: ${{ github.event.comment.user.login }}
+      COMMENT_ID: ${{ github.event.comment.id }}
+      BODY: ${{ github.event.comment.body }}
+    steps:
+      - name: Match the trigger sentence
+        id: match
+        run: |
+          # a line of the comment must be exactly the sentence (case
+          # insensitive, optional punctuation)
+          if printf '%s\n' "$BODY" | grep -qiE '^[[:space:]]*test this please[[:space:]!.]*$'; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "comment mentions the phrase but not as its own line - ignoring"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require write permission for the commenter
+        id: auth
+        if: steps.match.outputs.ok == 'true'
+        run: |
+          perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" --jq .permission || echo none)
+          echo "commenter ${COMMENTER} has permission: ${perm}"
+          case "$perm" in
+            admin|write) echo "ok=true"  >> "$GITHUB_OUTPUT";;
+            *)           echo "ok=false" >> "$GITHUB_OUTPUT"
+                         echo "not authorized to trigger tests - ignoring";;
+          esac
+
+      - name: Dispatch the PR tests
+        if: steps.auth.outputs.ok == 'true'
+        run: |
+          gh workflow run wmcore-pr-test.yml -R "$GITHUB_REPOSITORY" -f pr_number="$PR_NUM"
+          echo "dispatched wmcore-pr-test.yml for PR #$PR_NUM"
+
+      - name: Acknowledge with a rocket reaction
+        if: steps.auth.outputs.ok == 'true'
+        run: |
+          gh api -X POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content=rocket
