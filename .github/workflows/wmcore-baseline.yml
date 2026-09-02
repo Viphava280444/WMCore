@@ -54,7 +54,7 @@ env:
   WMCORE_JENKINS_ORG: dmwm
   WMCORE_JENKINS_REF: main
   # Jenkins-era scripts vendored in this repo, mounted by the override file
-  WMCORE_JENKINS_HOST_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/jenkins-scripts
+  WMCORE_JENKINS_HOST_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/scripts
   # optional real credentials on the runner VM; see .github/ci/RUNNER.md
   WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '/data/vkhlaisu/ci-secrets' }}
 
