@@ -108,6 +108,24 @@ jobs:
           cache: pip
           cache-dependency-path: .github/ci/hosted/requirements-hosted.txt
       - run: pip install -r .github/ci/hosted/requirements-hosted.txt
+      # Hosted runners have no Oracle Instant Client, so DBFactory's
+      # init_oracle_client() raises at import. Patch only this job's
+      # checkout copy; the repo file stays identical to upstream.
+      - name: tolerate missing Oracle client (checkout-copy patch)
+        run: |
+          python3 - <<'EOF'
+          from pathlib import Path
+          p = Path('src/python/WMCore/Database/DBFactory.py')
+          src = p.read_text()
+          old = 'oracledb.init_oracle_client()'
+          new = ('try:\n'
+                 '    oracledb.init_oracle_client()\n'
+                 'except oracledb.DatabaseError:  # thin mode is enough here\n'
+                 '    pass')
+          assert src.count(old) == 1, 'DBFactory changed upstream - revisit this patch'
+          p.write_text(src.replace(old, new))
+          print('patched', p)
+          EOF
       - name: dummy secrets file (no CERN secret involved)
         run: |
           mkdir -p .ci-secrets
