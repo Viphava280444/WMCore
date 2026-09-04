@@ -1,30 +1,91 @@
-# Verbatim copy of WMCore-Test-Base/docker-compose.yml from dmwm/WMCore-Jenkins
-# at commit b203d87308ef65c54945e1a6bed3940445a696c3.
-# Vendored because that repository is private and the workflow cannot read it.
-# Do not edit here; reviewers with dmwm access can diff it against the source.
+# The CI test stack: MariaDB + CouchDB + a test container per stack.
+# Derived from the previous CI's WMCore-Test-Base/docker-compose.yml
+# @ b203d873 with the fork's runner settings merged in - one file instead
+# of base + override.
+#
+# Parallel stacks: mariadb owns the stack's network namespace, couchdb and
+# the test container join it, so several stacks never collide on ports.
+# Per-stack env: COMPOSE_PROJECT_NAME, HOST_MOUNT_DIR, WMCI_MDB_DATA_DIR,
+# WMCI_NET, WMCI_PROXY, WMCI_CI_DIR, WMCI_SCRIPTS_DIR.
 
-x-common: &common-service
-  user: ${MY_ID}:${MY_GROUP}
-  network_mode: "host"
+# generated passwd/group (setup-users.sh) so containers resolve the sssd
+# runner account; scripts dir is the repo checkout
+x-volumes: &named
+  - &wma-admin "${HOST_MOUNT_DIR}/admin/wmagent:/data/admin/wmagent/"
+  - &passwd "${HOST_MOUNT_DIR}/admin/etc/passwd:/etc/passwd:ro"
+  - &group "${HOST_MOUNT_DIR}/admin/etc/group:/etc/group:ro"
+  - &sudoers "/etc/sudoers:/etc/sudoers:ro"
+  - &sudoersd "/etc/sudoers.d:/etc/sudoers.d:ro"
+  - &certs "${HOST_MOUNT_DIR}/certs:/data/certs"
+  - &stack-tmp "${HOST_MOUNT_DIR}/tmp:/tmp"
+  # mount target dictated by the container image: its baked-in entrypoint
+  # copies TestScripts/ and ContainerScripts/ out of this exact path.
+  - &scripts "${WMCI_SCRIPTS_DIR:?}:/home/cmsbld/WMCore-Jenkins:ro"
 
-x-volumes: &service-volumes
-  volumes:
-    - &wma-admin "${HOST_MOUNT_DIR}/admin/wmagent:/data/admin/wmagent/"
-    - &passwd "/etc/passwd:/etc/passwd:ro"
-    - &group "/etc/group:/etc/group:ro"
-    - &sudoers "/etc/sudoers:/etc/sudoers:ro"
-    - &sudoersd "/etc/sudoers.d:/etc/sudoers.d:ro"
-    - &certs "${HOST_MOUNT_DIR}/certs:/data/certs"
+# the test containers join their stack's namespace and reach the internet
+# through the stack's host proxy (bridge containers have no direct egress
+# on this VM). Set at container level so the entrypoint's git clone works
+# too; DB traffic (localhost) stays direct via no_proxy.
+x-test-common: &test-common
+  image: registry.cern.ch/cmsweb/wmcore-dev:${WMCORE_DEV_TAG}
+  user: root
+  pull_policy: always
+  network_mode: "service:mariadb"
+  depends_on:
+    mariadb:
+      condition: service_started
+    couchdb:
+      condition: service_healthy
+    egress-shim:
+      condition: service_started
+
+x-proxy-env: &proxy-env
+  http_proxy: ${WMCI_PROXY:-}
+  https_proxy: ${WMCI_PROXY:-}
+  HTTP_PROXY: ${WMCI_PROXY:-}
+  HTTPS_PROXY: ${WMCI_PROXY:-}
+  no_proxy: "localhost,127.0.0.1"
+  NO_PROXY: "localhost,127.0.0.1"
+
+x-test-volumes: &test-volumes
+  - "/etc/condor:/etc/condor:ro"
+  - *stack-tmp
+  - "/cvmfs:/cvmfs"
+  - *certs
+  - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/install:/data/srv/wmagent/current/install"
+  - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/logs:/data/srv/wmagent/current/logs"
+  - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/state:/data/srv/wmagent/current/state"
+  - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/config:/data/srv/wmagent/current/config"
+  - *wma-admin
+  - *passwd
+  - *group
+  - *sudoers
+  - *sudoersd
+  - "${HOST_MOUNT_DIR}/artifacts/:/home/cmsbld/artifacts/:Z"
+  - "/etc/grid-security:/etc/grid-security:ro"
+  - *scripts
 
 services:
+  # MariaDB data on a RAM disk (WMCI_MDB_DATA_DIR, pre-created by
+  # setup-env-gha.sh with runner ownership): tests recreate and wipe the DB
+  # every run, which is too slow on real disk. Losing it on stop is fine.
   mariadb:
-    <<: *common-service
     image: registry.cern.ch/cmsweb/mariadb:${MDB_TAG}
-    container_name: mariadb
+    user: ${MY_ID}:${MY_GROUP}
+    container_name: ${COMPOSE_PROJECT_NAME:-wmci}-mariadb
+    hostname: ${MY_HOSTNAME}
+    # Custom network, not the default bridge: the VM's default bridge has ip
+    # masquerade disabled and can't reach the host's loopback DNS stub. The
+    # dns: entries are a fallback.
+    networks:
+      - stacknet
+    dns:
+      - 137.138.16.5
+      - 137.138.17.5
     volumes:
-      - "/tmp:/tmp"
+      - *stack-tmp
       - *certs
-      - "${HOST_MOUNT_DIR}/srv/mariadb/${MDB_TAG}/install/database:/data/srv/mariadb/current/install/database"
+      - "${WMCI_MDB_DATA_DIR:-/dev/shm/wmci-mariadb-${MY_ID}}:/data/srv/mariadb/current/install/database"
       - "${HOST_MOUNT_DIR}/srv/mariadb/${MDB_TAG}/logs:/data/srv/mariadb/current/logs"
       - "${HOST_MOUNT_DIR}/admin/mariadb:/data/admin/mariadb/"
       - *wma-admin
@@ -32,14 +93,16 @@ services:
       - *group
       - *sudoers
       - *sudoersd
-    hostname: ${MY_HOSTNAME}
 
   couchdb:
-    <<: *common-service
     image: registry.cern.ch/cmsweb/wmagent-couchdb:${COUCH_TAG}
-    container_name: couchdb
+    user: ${MY_ID}:${MY_GROUP}
+    container_name: ${COMPOSE_PROJECT_NAME:-wmci}-couchdb
+    network_mode: "service:mariadb"
+    depends_on:
+      - mariadb
     volumes:
-      - "/tmp:/tmp"
+      - *stack-tmp
       - *certs
       - "${HOST_MOUNT_DIR}/srv/couchdb/${COUCH_TAG}/install:/data/srv/couchdb/current/install"
       - "${HOST_MOUNT_DIR}/srv/couchdb/${COUCH_TAG}/logs:/data/srv/couchdb/current/logs"
@@ -59,37 +122,63 @@ services:
       start_period: 30s
       start_interval: 5s
 
-  wmagent: &wma-base
-    <<: *common-service
-    image: registry.cern.ch/cmsweb/wmagent:${WMA_TAG}
-    volumes:
-      - "/etc/condor:/etc/condor:ro"
-      - "/tmp:/tmp"
-      - *certs
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/install:/data/srv/wmagent/current/install"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/logs:/data/srv/wmagent/current/logs"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/state:/data/srv/wmagent/current/state"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/config:/data/srv/wmagent/current/config"
-      - *wma-admin
-      - *passwd
-      - *group
-      - *sudoers
-      - *sudoersd
+  # Firewall-free egress: the VM blocks container<->host IP traffic, so this
+  # sidecar listens on 127.0.0.1:3128 and pipes to a unix socket served on
+  # the host - a filesystem path the firewall never sees.
+  egress-shim:
+    image: registry.cern.ch/cmsweb/wmcore-dev:${WMCORE_DEV_TAG}
+    user: ${MY_ID}:${MY_GROUP}
+    network_mode: "service:mariadb"
     depends_on:
       - mariadb
-      - couchdb
-  
+    entrypoint: ["python3", "/wmci/ci-shim.py", "127.0.0.1:3128", "/tmp/wmci-egress.sock"]
+    volumes:
+      - "${WMCI_CI_DIR:-.}/ci-shim.py:/wmci/ci-shim.py:ro"
+      - *stack-tmp
+
+  # PR mode: test-wmcorepy3.sh merges the PR (PR_NUMBER) onto the newest
+  # baseline tag before testing
+  wmcore-pr-test:
+    <<: *test-common
+    environment:
+      <<: *proxy-env
+      PR_NUMBER: ${PR_NUMBER}
+      TARGET_BRANCH: ${TARGET_BRANCH}
+      MY_ID: ${MY_ID}
+      MY_GROUP: ${MY_GROUP}
+      BUILD_ID: ${BUILD_ID}
+      WMCORE_ORG: ${WMCORE_ORG}
+      DMWMBOT_TOKEN: ${DMWMBOT_TOKEN}
+      # optional extra PYTHONPATH entry on the runner VM; test-wmcorepy3.sh
+      # prepends it when set, and leaves PYTHONPATH alone when empty
+      WMCI_EXTRA_PYTHONPATH: ${WMCI_EXTRA_PYTHONPATH:-}
+      WMA_CONFIG_FILE: ${WMA_CONFIG_FILE:-}
+    volumes: *test-volumes
+
+  # baseline mode: no PR_NUMBER, plain master
+  wmcore-unittests:
+    <<: *test-common
+    environment:
+      <<: *proxy-env
+      MY_ID: ${MY_ID}
+      MY_GROUP: ${MY_GROUP}
+      WMA_CONFIG_FILE: ${WMA_CONFIG_FILE:-}
+      BUILD_ID: ${BUILD_ID}
+      WMCORE_ORG: ${WMCORE_ORG}
+      WMCI_EXTRA_PYTHONPATH: ${WMCI_EXTRA_PYTHONPATH:-}
+    volumes: *test-volumes
+
+  # lint needs no databases, so it keeps host networking
   wmcore-pr-pylint:
     image: registry.cern.ch/cmsweb/wmcore-dev:${WMCORE_DEV_TAG}
     tty: true
     network_mode: "host"
     environment:
-      - ghprbPullId=${ghprbPullId}
-      - ghprbTargetBranch=${ghprbTargetBranch}
+      - PR_NUMBER=${PR_NUMBER}
+      - TARGET_BRANCH=${TARGET_BRANCH}
       - MY_ID
       - MY_GROUP
-      - WMCORE_JENKINS_ORG
-      - WMCORE_JENKINS_REF
+      - WMCORE_ORG
       - BUILD_ID
     command: ["/bin/bash"]
     volumes:
@@ -98,75 +187,17 @@ services:
       - *sudoers
       - *sudoersd
       - "${HOST_MOUNT_DIR}/artifacts/:/home/cmsbld/artifacts/:Z"
-  
-  wmcore-pr-test:
-    <<: *wma-base
-    image: registry.cern.ch/cmsweb/wmcore-dev:${WMCORE_DEV_TAG}
-    network_mode: "host"
-    environment:
-      - ghprbPullId=${ghprbPullId}
-      - ghprbTargetBranch=${ghprbTargetBranch}
-      - MY_ID
-      - MY_GROUP
-      - BUILD_ID
-      - WMCORE_JENKINS_ORG
-      - WMCORE_JENKINS_REF
-      - DMWMBOT_TOKEN
-    user: root
-    pull_policy: always
-    volumes:
-      - "/etc/condor:/etc/condor:ro"
-      - "/tmp:/tmp"
-      - "/cvmfs:/cvmfs"
-      - *certs
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/install:/data/srv/wmagent/current/install"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/logs:/data/srv/wmagent/current/logs"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/state:/data/srv/wmagent/current/state"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/config:/data/srv/wmagent/current/config"
-      - *wma-admin
-      - *passwd
-      - *group
-      - *sudoers
-      - *sudoersd
-      - "${HOST_MOUNT_DIR}/artifacts/:/home/cmsbld/artifacts/:Z"
-      - "/etc/grid-security:/etc/grid-security:ro"
-    depends_on:
-      couchdb:
-        condition: service_healthy
-      mariadb:
-        condition: service_started
-  
-  wmcore-unittests:
-    <<: *wma-base
-    image: registry.cern.ch/cmsweb/wmcore-dev:${WMCORE_DEV_TAG}
-    network_mode: "host"
-    environment:
-      - MY_ID
-      - MY_GROUP
-      - WMA_CONFIG_FILE
-      - BUILD_ID
-      - WMCORE_JENKINS_ORG
-      - WMCORE_JENKINS_REF
-    user: root
-    pull_policy: always
-    volumes:
-      - "/etc/condor:/etc/condor:ro"
-      - "/tmp:/tmp"
-      - "/cvmfs:/cvmfs"
-      - *certs
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/install:/data/srv/wmagent/current/install"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/logs:/data/srv/wmagent/current/logs"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/state:/data/srv/wmagent/current/state"
-      - "${HOST_MOUNT_DIR}/srv/wmagent/${WMA_TAG}/config:/data/srv/wmagent/current/config"
-      - *wma-admin
-      - *passwd
-      - *group
-      - *sudoers
-      - *sudoersd
-      - "${HOST_MOUNT_DIR}/artifacts/:/home/cmsbld/artifacts/:Z"
-      - "/etc/grid-security:/etc/grid-security:ro"
-    depends_on:
-      couchdb:
-        condition: service_healthy
-      mariadb:
-        condition: service_started
+      - *scripts
+
+networks:
+  stacknet:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+    # pinned subnet so the bridge gateway IP is known BEFORE the network
+    # exists; WMCI_NET makes it unique per stack
+    ipam:
+      driver: default
+      config:
+        - subnet: "172.30.${WMCI_NET:-90}.0/24"
+          gateway: "172.30.${WMCI_NET:-90}.1"

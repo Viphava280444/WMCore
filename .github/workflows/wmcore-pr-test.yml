@@ -1,10 +1,4 @@
-# WMCore PR tests, migrated from Jenkins. Mirrors dmwm/WMCore-Jenkins.
-# Jenkins stage -> job:
-#   PullRequestTestBegin.py        -> begin
-#   WMCore-PR-test 12-slice matrix -> unit-tests
-#   WMCore-PR-pylint               -> lint container inside unit-tests
-#   PullRequestReport.py           -> wmcore-pr-report.yml (separate workflow)
-#   ghprb "default" build status   -> last step of wmcore-pr-report.yml
+# WMCore PR tests, migrated from the previous CI.
 # Same images, tags, test command, slice split and 5 retries. The compose file
 # is a vendored copy; the test, lint and report scripts run unchanged.
 #
@@ -13,9 +7,8 @@
 #   - lint runs beside the stacks; the run summary lives in wmcore-pr-report.yml
 #   - stacks reach the internet through a per-stack host proxy on a unix socket
 #   - dummy secrets and a self-signed cert; DMWMBOT_TOKEN is the own GITHUB_TOKEN
-#   - git URLs redirect dmwm/WMCore -> this fork. DELETE when moving upstream.
 #
-# Fork PRs (the Jenkins "test this please" flow): a run started by a fork
+# Fork PRs: a run started by a fork
 # pull_request gets a read-only token, so THIS workflow only runs the tests
 # and uploads artifacts; wmcore-pr-report.yml posts the comment and statuses
 # afterwards, with a write token. Two gates protect the credentialed runner,
@@ -53,29 +46,37 @@ permissions:
   statuses: write
 
 env:
-  # same values as WMCore-PR-test/Jenkinsfile
+  # same values as the previous CI
   WMA_TAG: '2.3.3'
   COUCH_TAG: '3.2.2'
   MDB_TAG: '10.6.19'
   TEST_SERVICE: 'wmcore-pr-test'
   SLICES: '12'
-  # Jenkins job parameter; -stable tag on registry.cern.ch/cmsweb/wmcore-dev
+  # job parameter; -stable tag on registry.cern.ch/cmsweb/wmcore-dev
   WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
-  # Jenkins ghprb plugin equivalents
-  ghprbPullId: ${{ github.event.pull_request.number || inputs.pr_number }}
-  ghprbTargetBranch: ${{ github.base_ref || 'master' }}
+  # PR context passed to the test scripts
+  PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+  TARGET_BRANCH: ${{ github.base_ref || 'master' }}
   BUILD_ID: ${{ github.run_id }}
-  # Jenkins BUILD_URL; the report script appends a path, and the trailing '#'
+  # build URL; the report script appends a path, and the trailing '#'
   # keeps that a harmless URL fragment
   BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
   DMWMBOT_TOKEN: ''
-  WMCORE_JENKINS_ORG: dmwm
-  WMCORE_JENKINS_REF: main
-  # VM-local clone of the private dmwm/WMCore-Jenkins, mounted by the override file
-  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
+  # compose interpolates this for the test services; unused by the PR run
+  WMA_CONFIG_FILE: ''
+  # the container entrypoint and the vendored scripts clone this owner's WMCore
+  WMCORE_ORG: ${{ github.repository_owner }}
+  # vendored scripts (.github/ci/scripts), mounted into the containers
+  WMCI_SCRIPTS_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/scripts
+  # optional real credentials on the runner VM; empty means the script default
+  # (see .github/ci/RUNNER.md)
+  WMCI_SECRETS_DIR: ${{ vars.WMCI_SECRETS_DIR || '' }}
+  # optional extra PYTHONPATH entry inside the test containers (an
+  # additional-library dir on the runner VM); empty leaves PYTHONPATH alone
+  WMCI_EXTRA_PYTHONPATH: ${{ vars.WMCI_EXTRA_PYTHONPATH || '' }}
 
 jobs:
-  # fork twin of the Jenkins "Update GitHub PR status" stage: the unchanged
+  # fork twin of the previous CI's "Update GitHub PR status" stage: the unchanged
   # PullRequestTestBegin.py posts a 'pending' commit status. It passes no
   # context, so GitHub names the status "default". It runs on the runner VM.
   begin:
@@ -86,6 +87,14 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
+      # own-ref checkout: this job only runs for same-repo PRs and
+      # dispatches, both trusted - and the PR that vendors these scripts
+      # must be able to test itself before they exist on master
+      - name: Checkout CI scripts
+        uses: actions/checkout@v4
+        with:
+          path: wmcore-src
+
       - name: Report tests started (unchanged PullRequestTestBegin.py)
         env:
           DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -95,7 +104,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/report-venv"
           "$RUNNER_TEMP/report-venv/bin/pip" -q install PyGithub
           "$RUNNER_TEMP/report-venv/bin/python" \
-            "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestTestBegin.py"
+            "$WMCI_SCRIPTS_DIR/ContainerScripts/PullRequestTestBegin.py"
 
   # fork twin of the WMCore-PR-test 12-cell matrix, run as THREE isolated
   # stacks in parallel inside one job. The slice groups are a runtime-balanced
@@ -131,7 +140,7 @@ jobs:
           echo "MY_HOSTNAME=$(hostname -f)" >> "$GITHUB_ENV"
           echo "MY_ID=$(id -u)" >> "$GITHUB_ENV"
           echo "MY_GROUP=$(id -g)" >> "$GITHUB_ENV"
-          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml:$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.override.yml" >> "$GITHUB_ENV"
+          echo "COMPOSE_FILE=$GITHUB_WORKSPACE/wmcore-src/.github/ci/docker-compose.yml" >> "$GITHUB_ENV"
           echo "WMCI_CI_DIR=$GITHUB_WORKSPACE/wmcore-src/.github/ci" >> "$GITHUB_ENV"
           docker version
           docker compose version
@@ -170,7 +179,7 @@ jobs:
 
       # Each stack: own compose project, workspace, RAM data dir, bridge subnet
       # and host egress proxy. Inside a stack the slices run one after another,
-      # with the Jenkinsfile's retry(5). The lint container runs beside them.
+      # with the previous CI's retry(5). The lint container runs beside them.
       # This step never decides the job outcome - the integrity check below
       # does - so a teardown or lint hiccup cannot turn a complete run red.
       - name: Run 3 stacks and pylint in parallel
@@ -219,10 +228,9 @@ jobs:
             sleep 2
           done
           [ -n "$chowned" ] || echo "[S$K] warning: /home/cmsbld/etc still not writable after 120s, continuing"
-          # Fork only: the unchanged scripts hardcode dmwm/WMCore, so make git
-          # resolve it to this fork. DELETE this when moving upstream.
-          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" "$TEST_SERVICE" bash -c '
-            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+          # Identity and pull/safe-directory settings for the in-container git;
+          # the repo owner itself comes from WMCORE_ORG.
+          docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig "$TEST_SERVICE" bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
             # modern git refuses a divergent pull without a strategy; the test
@@ -244,12 +252,13 @@ jobs:
           for S in $SLICE_LIST; do
             s0=$(date +%s)
             ok=0
-            # same as the Jenkinsfile: retry(5) around the unchanged script
+            # same as the previous CI: retry(5) around the unchanged script
             for attempt in 1 2 3 4 5; do
-              echo "[S$K] attempt $attempt: testing slice $S of $SLICES for build $BUILD_ID (PR ${ghprbPullId:-none})"
+              echo "[S$K] attempt $attempt: testing slice $S of $SLICES for build $BUILD_ID (PR ${PR_NUMBER:-none})"
               if docker compose exec -T -u "$MY_ID" \
                    -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
-                   -e ghprbPullId="$ghprbPullId" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+                   -e PR_NUMBER="$PR_NUMBER" -e WMCORE_ORG="$WMCORE_ORG" \
+                   -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                    -e WMCORE_TEST_EXIT_ALARM=10 \
                    -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
                    "$TEST_SERVICE" /home/cmsbld/TestScripts/test-wmcorepy3.sh; then
@@ -287,9 +296,8 @@ jobs:
             sleep 2
           done
           [ -n "$ready" ] || { echo "[lint] entrypoint setup failed"; docker compose logs wmcore-pr-pylint | tail -n 25; exit 1; }
-          # same fork redirect as the stacks; delete when moving upstream
-          docker compose exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig -e GITHUB_REPOSITORY="$GITHUB_REPOSITORY" wmcore-pr-pylint bash -c '
-            git config --file "$GIT_CONFIG_GLOBAL" url."https://github.com/$GITHUB_REPOSITORY.git".insteadOf "https://github.com/dmwm/WMCore.git"
+          # same in-container git settings as the stacks
+          docker compose exec -T -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig wmcore-pr-pylint bash -c '
             git config --file "$GIT_CONFIG_GLOBAL" user.name  "wmcore-fork-ci"
             git config --file "$GIT_CONFIG_GLOBAL" user.email "wmcore-fork-ci@users.noreply.github.com"
             # modern git refuses a divergent pull without a strategy; the test
@@ -298,7 +306,8 @@ jobs:
             git config --file "$GIT_CONFIG_GLOBAL" pull.rebase false
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
           docker compose exec -T \
-            -e ghprbPullId="$ghprbPullId" -e ghprbTargetBranch="$ghprbTargetBranch" \
+            -e PR_NUMBER="$PR_NUMBER" -e TARGET_BRANCH="$TARGET_BRANCH" \
+            -e WMCORE_ORG="$WMCORE_ORG" \
             -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
           rc=$?

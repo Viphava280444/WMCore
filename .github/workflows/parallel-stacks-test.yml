@@ -1,9 +1,0 @@
-# Dispatch stub: real jobs live on branch parallel-stacks-test.
-name: Parallel stacks test
-on:
-  workflow_dispatch:
-jobs:
-  pointer:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "Real version on branch parallel-stacks-test"

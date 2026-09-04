@@ -7,12 +7,13 @@ of the file. Any PR touching a legacy file with pre-existing debt therefore
 goes red no matter what the diff does (first seen live: 20 pre-existing W0718
 in MSUnmerged.py failed PR #9 while both scores were unchanged at 9.67).
 
-This script rewrites the per-event loop in the COPY (the dmwm-owned original
-on the VM stays untouched, same pattern as the 'GitHub Actions results:'
-wording sed) so that an event "must be fixed" only when the PR side of a file
-has MORE events of that (type, code) than the master side. Pre-existing debt
-is reclassified as a warning, keeping the comment's counts consistent with
-the verdict. The score-based rules below the loop are left unchanged.
+This script rewrites the per-event loop so that an event "must be fixed" only
+when the PR side of a file has MORE events of that (type, code) than the master
+side. Pre-existing debt is reclassified as a warning, keeping the comment's
+counts consistent with the verdict. The score-based rules below the loop are
+left unchanged. The rewrite is applied to a throwaway COPY that the report
+workflow makes per run, so the checked-out PullRequestReport.py under
+.github/ci/scripts is never modified on disk.
 
 Usage: patch-pylint-delta.py <path-to-copied-PullRequestReport.py>
 Exits 1 loudly if the expected upstream block is not found exactly once,

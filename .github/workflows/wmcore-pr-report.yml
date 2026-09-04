@@ -1,5 +1,5 @@
 # WMCore PR report: posts the "GitHub Actions results:" comment and the commit
-# statuses for a completed "WMCore PR tests" run. Jenkins twin: WMCore-PR-Report.
+# statuses for a completed "WMCore PR tests" run.
 #
 # Why a separate workflow: a fork pull_request run holds a read-only token,
 # but this base-repo workflow_run always gets a write token, fork PRs included.
@@ -32,22 +32,28 @@ permissions:
   actions: read
 
 env:
-  ghprbTargetBranch: master
   BUILD_ID: ${{ github.run_id }}
   # the PR comment links here; the trailing '#' keeps the path the script
   # appends a harmless fragment
   BUILD_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#
-  # VM-local clone of the private dmwm/WMCore-Jenkins
-  WMCORE_JENKINS_HOST_DIR: /data/vkhlaisu/WMCore-Jenkins
+  # vendored CI scripts (.github/ci/scripts), checked out from master below
+  WMCI_SCRIPTS_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/scripts
 
 jobs:
   report:
     # cancelled test runs have nothing to report; success AND failure do
-    # (like Jenkins, the report posts even when tests failed)
+    # (as in the previous CI, the report posts even when tests failed)
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
+      # the vendored CI scripts; always master's copy, never PR code
+      - name: Checkout CI scripts from master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          path: wmcore-src
+
       # Which test run, which PR. On dispatch both come from inputs; on
       # workflow_run the PR number comes from the pr-context artifact, since
       # the event payload omits fork PRs (validated as in the header).
@@ -89,7 +95,7 @@ jobs:
               exit 1
             fi
           fi
-          echo "ghprbPullId=${pr}" >> "$GITHUB_ENV"
+          echo "PR_NUMBER=${pr}" >> "$GITHUB_ENV"
           echo "PR_HEAD_SHA=${head_sha}" >> "$GITHUB_ENV"
           echo "should=true" >> "$GITHUB_OUTPUT"
           echo "test-run-id=${test_run_id}" >> "$GITHUB_OUTPUT"
@@ -135,8 +141,7 @@ jobs:
           run-id: ${{ steps.ctx.outputs.test-run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Jenkins: copyArtifacts projectName 'WMCore-Unittest-Baseline',
-      # selector lastSuccessful()
+      # previous CI: the latest successful baseline run's artifacts
       - name: Find latest successful baseline run
         if: steps.ctx.outputs.should == 'true'
         id: baseline
@@ -147,8 +152,7 @@ jobs:
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/wmcore-baseline.yml/runs?status=success&per_page=1" \
             | python3 -c 'import json,sys; runs=json.load(sys.stdin)["workflow_runs"]; print(runs[0]["id"] if runs else "")')
           if [ -z "$run_id" ]; then
-            echo "No successful baseline run found. Run the 'WMCore baseline' workflow first" \
-                 "(Jenkins equivalent: WMCore-Unittest-Baseline lastSuccessful)." >&2
+            echo "No successful baseline run found. Run the 'WMCore baseline' workflow first." >&2
             exit 1
           fi
           echo "Using baseline from run $run_id"
@@ -183,24 +187,20 @@ jobs:
               print(side + ': all 14 slices present')
           EOF
 
-      # twin of "Generate Reports": jinja templates from the VM-local
-      # WMCore-Jenkins clone, patched with two fork-only changes at runtime
-      # (comment wording, delta-aware pylint gate).
+      # twin of "Generate Reports": jinja templates from the vendored scripts
+      # dir, with the delta-aware pylint gate patched in at runtime.
       - name: Generate report and update PR (PullRequestReport.py)
         if: steps.ctx.outputs.should == 'true'
         env:
           DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WMCORE_REPO: ${{ github.repository_owner }}
           CODE_REPO: WMCore
-          JENKINS_JINJA_TEMPLATE_PATH: ${{ env.WMCORE_JENKINS_HOST_DIR }}/templates
+          WMCI_TEMPLATE_PATH: ${{ env.WMCI_SCRIPTS_DIR }}/templates
         run: |
-          # Fork-only wording change. The VM clone is read-only, so patch a
-          # throwaway copy. The grep fails loudly if upstream text drifts.
-          cp "$WMCORE_JENKINS_HOST_DIR/ContainerScripts/PullRequestReport.py" \
+          # patch-pylint-delta.py rewrites the file it is given, so work on a
+          # throwaway copy and leave the checked-out script untouched.
+          cp "$WMCI_SCRIPTS_DIR/ContainerScripts/PullRequestReport.py" \
              "$RUNNER_TEMP/PullRequestReport.py"
-          grep -q "'Jenkins results:" "$RUNNER_TEMP/PullRequestReport.py" \
-            || { echo "upstream PullRequestReport.py no longer says 'Jenkins results:' - review the rename"; exit 1; }
-          sed -i "s/'Jenkins results:/'GitHub Actions results:/" "$RUNNER_TEMP/PullRequestReport.py"
           # Delta-aware pylint gate (fail only on NEW W/E); fetch the patcher
           # from master since this workflow checks out no code.
           curl -sf -o "$RUNNER_TEMP/patch-pylint-delta.py" \
@@ -219,8 +219,8 @@ jobs:
           path: artifacts/PullRequestReport.html
           if-no-files-found: warn
 
-      # twin of the ghprb plugin: flips the "default" status (set to pending
-      # by the begin job) to the outcome of this report job.
+      # flips the "default" status (set to pending by the begin job) to the
+      # outcome of this report job.
       - name: Finish default status (report job outcome)
         if: always() && steps.ctx.outputs.should == 'true'
         env:
