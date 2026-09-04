@@ -148,6 +148,12 @@ jobs:
           docker version
           docker compose version
 
+      - name: Start resource sampler
+        run: |
+          setsid nohup bash wmcore-src/.github/ci/resource-sampler.sh > resource-samples.txt 2>&1 &
+          echo $! > sampler.pid
+
+
       - name: Stop leftover containers
         run: |
           # the vendored compose file pins daemon-global container_names, so a
@@ -369,6 +375,50 @@ jobs:
               print('IMPLAUSIBLE total test count: %d' % total)
           sys.exit(1 if (bad or missing or total < 1000) else 0)
           EOF
+
+      - name: Summarize resource usage
+        if: always()
+        run: |
+          [ -f sampler.pid ] && kill "$(cat sampler.pid)" 2>/dev/null || true
+          python3 - <<'EOF'
+          import os
+          rows = []
+          with open('resource-samples.txt') as f:
+              next(f, None)
+              for line in f:
+                  p = line.split()
+                  if len(p) == 6:
+                      try:
+                          rows.append((int(p[1]), int(p[2]), int(p[3]), float(p[4]), int(p[5])))
+                      except ValueError:
+                          pass
+          if not rows:
+              print('no samples collected')
+              raise SystemExit(0)
+          cpu = [r[0] for r in rows]; mem = [r[1] for r in rows]
+          shm = [r[2] for r in rows]; load = [r[3] for r in rows]; drss = [r[4] for r in rows]
+          def row(name, v, unit):
+              return f'| {name} | {max(v)}{unit} | {sum(v)//len(v)}{unit} |'
+          lines = ['## Resource usage (whole VM, 10s samples)', '',
+                   '| metric | peak | mean |', '|---|---|---|',
+                   row('CPU', cpu, ' %'), row('memory used', mem, ' MB'),
+                   row('/dev/shm used', shm, ' MB'),
+                   f'| load1 | {max(load)} | {round(sum(load)/len(load), 1)} |',
+                   row('docker containers RSS', drss, ' MB'),
+                   '', f'{len(rows)} samples.']
+          out = '\n'.join(lines) + '\n'
+          print(out)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(out)
+          EOF
+
+      - name: Upload resource samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resource-samples
+          path: resource-samples.txt
+          if-no-files-found: warn
 
       - name: Stop stacks
         if: always()
