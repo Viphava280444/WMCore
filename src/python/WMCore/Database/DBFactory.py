@@ -8,10 +8,7 @@ import oracledb
 #       Further details at: https://cjones-oracle.medium.com/using-python-oracledb-1-0-with-sqlalchemy-pandas-django-and-flask-5d84e910cb19
 oracledb.version = "8.3.0"
 sys.modules["cx_Oracle"] = oracledb
-try:
-    oracledb.init_oracle_client()
-except oracledb.DatabaseError:  # no Oracle Instant Client on this host (DPI-1047); thin mode is enough for non-Oracle backends
-    pass
+oracledb.init_oracle_client()
 
 
 from sqlalchemy import create_engine
