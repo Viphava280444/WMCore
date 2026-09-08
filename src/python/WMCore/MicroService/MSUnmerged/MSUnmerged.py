@@ -347,14 +347,7 @@ class MSUnmerged(MSCore):
             self._logMemoryUsage(f"before processing RSE {rse['name']}")
 
             for dirLfn in rse['dirs']['toDelete']:
-                if not self.msConfig['enableRealMode']:
-                    self.logger.info("DRY-RUN: would delete directory: %s", rse['pfnPrefix'] + dirLfn)
-                    continue
-
                 # Create a fresh gfal2 context for each directory
-                # NOTE: createGfal2Context() returns None on emulateGfal2=True by
-                # design, so the dry-run check above must come first - otherwise
-                # every directory would be counted as a failed deletion.
                 ctx = self._createGfal2ContextForDirectory(rse['name'], dirLfn)
                 if ctx is None:
                     self._updateFailureCounters(rse, dirLfn)
@@ -362,6 +355,10 @@ class MSUnmerged(MSCore):
 
                 try:
                     dirPfn = rse['pfnPrefix'] + dirLfn
+
+                    if not self.msConfig['enableRealMode']:
+                        self.logger.info("DRY-RUN: would delete directory: %s", dirPfn)
+                        continue
 
                     # First attempt: Try to delete the whole directory
                     if self._rmDir(ctx, dirPfn):
