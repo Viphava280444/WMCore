@@ -148,7 +148,7 @@ def jobrange(candidate):
         For example valid candidates are either 1 or 1,2 or 3-6,5,7-8
         It is like when you specifies which pages to print in Word
     """
-    return check("^\d+(-\d+)?(,\d+(-\d+)?)*$", candidate)
+    return check("^\d+(-\d+)?(,\d+(-\d+)?)?$", candidate)
 
 
 def cmsname(candidate):
