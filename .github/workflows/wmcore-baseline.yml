@@ -31,11 +31,9 @@ on:
 permissions:
   contents: write   # push and prune the BASELINE_<timestamp> tags
 
-# Shared with the unit-tests job of wmcore-pr-test.yml. A test run uses the
-# whole VM, so baseline and PR runs must queue instead of overlapping.
-concurrency:
-  group: vocms047-tests
-  cancel-in-progress: false
+# No concurrency group on purpose: GitHub keeps one waiting job per group and
+# cancels earlier waiters, which evicted queued PR runs. The single self-hosted
+# runner executes one job at a time, so baseline and PR runs queue by themselves.
 
 env:
   # Must match wmcore-pr-test.yml. The PR/baseline comparison is only
