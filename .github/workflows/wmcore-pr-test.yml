@@ -32,9 +32,11 @@ on:
         description: 'PR number to test'
         required: true
 
-# Two levels: here, per PR, a new push cancels the running tests. The unit-tests
-# job also joins group "vocms047-tests" so a PR run and a baseline run never
-# overlap. Do not move that group here: it would serialize unrelated PRs.
+# Per PR: a new push cancels the running tests. There is deliberately NO shared
+# runner group: GitHub keeps only one waiting job per concurrency group and
+# cancels the earlier waiter ("higher priority waiting request"), so a burst
+# of PRs evicted each other. The single self-hosted runner executes one job at
+# a time and queues the rest itself, which is the serialization we need.
 concurrency:
   group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
   cancel-in-progress: true
@@ -118,11 +120,8 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     # the head-room is for the retry(5) loops
     timeout-minutes: 90
-    # the three stacks use the whole VM: never at the same time as a baseline
-    # run (same group there), and never cancelled halfway
-    concurrency:
-      group: vocms047-tests
-      cancel-in-progress: false
+    # the three stacks use the whole VM; the runner runs one job at a time, so
+    # this never overlaps a baseline run (see the concurrency note above)
     env:
       STACK1_SLICES: '1 2 5 10 12'
       STACK2_SLICES: '0 6 7 8 13'

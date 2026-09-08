@@ -141,22 +141,39 @@ jobs:
           run-id: ${{ steps.ctx.outputs.test-run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # previous CI: the latest successful baseline run's artifacts
+      # previous CI: the latest successful baseline run's artifacts.
+      # The runs API does not guarantee ordering (seen live: the first item
+      # was a 15-day-old run), so fetch a page and pick the newest here, and
+      # refuse a stale baseline rather than compare against an old environment.
       - name: Find latest successful baseline run
         if: steps.ctx.outputs.should == 'true'
         id: baseline
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MAX_AGE_HOURS: ${{ vars.WMCI_BASELINE_MAX_AGE_HOURS || 36 }}
         run: |
-          run_id=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/wmcore-baseline.yml/runs?status=success&per_page=1" \
-            | python3 -c 'import json,sys; runs=json.load(sys.stdin)["workflow_runs"]; print(runs[0]["id"] if runs else "")')
-          if [ -z "$run_id" ]; then
-            echo "No successful baseline run found. Run the 'WMCore baseline' workflow first." >&2
-            exit 1
-          fi
-          echo "Using baseline from run $run_id"
-          echo "run-id=$run_id" >> "$GITHUB_OUTPUT"
+          curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/wmcore-baseline.yml/runs?status=success&per_page=30" \
+            > baseline-runs.json
+          python3 - <<'EOF'
+          import json, os, sys
+          from datetime import datetime, timezone
+          runs = [r for r in json.load(open('baseline-runs.json'))['workflow_runs']
+                  if r.get('conclusion') == 'success']
+          if not runs:
+              sys.exit("No successful baseline run found. Run the 'WMCore baseline' workflow first.")
+          newest = max(runs, key=lambda r: r['created_at'])
+          created = datetime.fromisoformat(newest['created_at'].replace('Z', '+00:00'))
+          age_h = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+          print(f"Using baseline from run {newest['id']} (created {newest['created_at']}, "
+                f"age {age_h:.1f} h, sha {newest['head_sha'][:9]}, {len(runs)} candidates)")
+          max_age = float(os.environ['MAX_AGE_HOURS'])
+          if age_h > max_age:
+              sys.exit(f"Newest successful baseline is {age_h:.1f} h old (limit {max_age:.0f} h). "
+                       "Fix or dispatch the 'WMCore baseline' workflow before trusting PR verdicts.")
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
+              fh.write(f"run-id={newest['id']}\n")
+          EOF
 
       - name: Fetch baseline results (MasterUnitTests)
         if: steps.ctx.outputs.should == 'true'
