@@ -11,21 +11,32 @@
 # Fork PRs: a run started by a fork
 # pull_request gets a read-only token, so THIS workflow only runs the tests
 # and uploads artifacts; wmcore-pr-report.yml posts the comment and statuses
-# afterwards, with a write token. Two gates protect the credentialed runner,
-# both required for a fork PR:
-#   1. repo setting "require approval for workflow runs from all outside
-#      collaborators" - a maintainer releases every push's run;
-#   2. the 'safe-to-test' label, set by a maintainer after reading the diff
-#      (the unit-tests guard checks it).
+# afterwards, with a write token.
+#
+# What actually protects the credentialed runner against a fork PR:
+#   1. the repo setting "require approval for workflow runs from all outside
+#      collaborators". This is the gate that holds: a maintainer releases every
+#      push's run, so no fork code runs unreviewed.
+#   2. the 'safe-to-test' label, checked by the unit-tests guard below. It is
+#      defence in depth, not a second independent gate - by itself a label
+#      cannot decide anything, since only gate 1 stops the run from starting.
+#      To keep the label meaning "this diff", wmcore-pr-label-reset.yml removes
+#      it on every push, and 'labeled' is in the event types so that adding it
+#      back starts the run (other labels are ignored by both jobs).
 # Fallback: a dispatch with pr_number tests any PR with full permissions.
 # A collaborator can also comment "gha test please" on the PR - the
-# wmcore-pr-comment-trigger.yml workflow makes that dispatch.
+# wmcore-pr-comment-trigger.yml workflow makes that dispatch, pinned to the
+# head commit that collaborator saw (head_sha).
 
 name: WMCore PR tests
 
 on:
   pull_request:
     branches: [master]
+    # 'labeled' is not a default type, so without it adding 'safe-to-test' to a
+    # fork PR started nothing and the maintainer had to close and reopen the PR.
+    # Both jobs ignore every label but that one.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -35,14 +46,21 @@ on:
         description: 'PR head commit the maintainer reviewed; empty = current head'
         required: false
 
-# Per PR: a new push cancels the running tests. There is deliberately NO shared
-# runner group: GitHub keeps only one waiting job per concurrency group and
-# cancels the earlier waiter ("higher priority waiting request"), so a burst
-# of PRs evicted each other. The single self-hosted runner executes one job at
-# a time and queues the rest itself, which is the serialization we need.
+# Per PR and per door. A new push cancels its own PR's running tests, because
+# those results describe a commit nobody will merge. A requested run must NOT
+# cancel: throwing away ~25 minutes of the single runner because someone asked
+# for tests while a push-run was in flight is pure loss, and the event name in
+# the group key keeps the two doors from evicting each other either way.
+# An expression is allowed here (workflow-syntax reference, "concurrency").
+#
+# There is deliberately NO shared runner group: GitHub keeps only one waiting
+# job per concurrency group and cancels the earlier waiter ("higher priority
+# waiting request"), so a burst of PRs evicted each other. The single
+# self-hosted runner executes one job at a time and queues the rest itself,
+# which is the serialization we need.
 concurrency:
-  group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
+  group: wmcore-pr-test-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # begin posts the 'pending' status; every other write lives in
 # wmcore-pr-report.yml
@@ -87,8 +105,12 @@ jobs:
   begin:
     # Skip on fork PRs: their runs hold a read-only token, so this status post
     # would fail. Fork PRs simply get no 'pending' mark; the report workflow
-    # posts their results at the end.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # posts their results at the end. A 'labeled' event only counts when the
+    # label is 'safe-to-test' - any other label must not start a run.
+    if: >-
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'safe-to-test')
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
@@ -142,7 +164,9 @@ jobs:
     # trust gate: same-repo PRs and dispatches always run; a fork PR runs only
     # with the maintainer-set 'safe-to-test' label. begin skips on fork PRs
     # (read-only token), so !cancelled() keeps this job alive past that skip.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.labels.*.name, 'safe-to-test')) }}
+    # The last clause keeps unrelated labels from starting a run (and, with
+    # cancel-in-progress, from cancelling one).
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.labels.*.name, 'safe-to-test')) && (github.event.action != 'labeled' || github.event.label.name == 'safe-to-test') }}
     runs-on: [self-hosted, Linux, X64]
     # the head-room is for the retry(5) loops
     timeout-minutes: 90
