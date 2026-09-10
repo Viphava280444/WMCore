@@ -44,7 +44,10 @@ jobs:
     # cancelled test runs have nothing to report; success AND failure do
     # (as in the previous CI, the report posts even when tests failed)
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' || github.event.workflow_run.conclusion == 'failure'
-    runs-on: [self-hosted, Linux, X64]
+    # GitHub-hosted on purpose: this job only needs python, the artifacts and
+    # the GitHub API. On the single self-hosted runner it queued behind every
+    # waiting test job (up to 52 min observed), so PR comments arrived late.
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       # the vendored CI scripts; always master's copy, never PR code
@@ -101,9 +104,9 @@ jobs:
           echo "test-run-id=${test_run_id}" >> "$GITHUB_OUTPUT"
           echo "Reporting on test run ${test_run_id} for PR ${pr} (head ${head_sha})"
 
-      # The workspace persists between runs, so stale results must be removed
-      # first. KnownFailures.txt is read PR-head first, so a PR that fixes a
-      # known failure explains itself.
+      # A hosted runner starts clean; the rm keeps this step correct if the job
+      # ever moves back to a persistent workspace. KnownFailures.txt is read
+      # PR-head first, so a PR that fixes a known failure explains itself.
       - name: Set up report environment
         if: steps.ctx.outputs.should == 'true'
         run: |
