@@ -10,6 +10,13 @@
 # (wmcore-pr-test.yml with pr_number, the proven dispatch door). The
 # report workflow then posts the comment and statuses as usual.
 #
+# Before dispatching, the job checks that the PR is open and not conflicting
+# and answers on the PR when it is not, and it pins the head commit the
+# commenter authorized. The explanation comments start with the trigger
+# sentence but are not that sentence on a line of their own, so they cannot
+# re-trigger this workflow (nor could they anyway: they are posted with the
+# repository token, and the pre-filter drops comments made by a bot).
+#
 # Safety: runs on a hosted runner, never checks out or executes PR code,
 # and the comment body is compared as data, never evaluated. Only the
 # commenter's repo permission decides; an unauthorized comment is ignored
@@ -73,11 +80,33 @@ jobs:
       # Pin that commit and hand it to the test run, so a push landing between
       # this comment and the tests cannot borrow the authorization, and the
       # commit statuses land on the commit that was actually tested.
+      # Same call answers whether there is anything to test at all. A closed PR
+      # and a conflicting one both produce a run that dies inside the container
+      # minutes later, on the single runner, with nothing on the PR to explain
+      # it - so say it here instead. 'mergeable' is null while GitHub is still
+      # computing the merge; that is not a conflict, so proceed.
       - name: Resolve the reviewed PR head
         id: pr
         if: steps.auth.outputs.ok == 'true'
         run: |
           gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}" > pr.json
+          state=$(jq -r '.state' pr.json)
+          mergeable=$(jq -r '.mergeable' pr.json)
+          echo "PR ${PR_NUM}: state=${state} mergeable=${mergeable}"
+          if [ "$state" != "open" ]; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+              -f body='gha test please: this pull request is not open; nothing started.' \
+              || echo "::warning::could not post the explanation comment"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$mergeable" = "false" ]; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+              -f body='gha test please: this pull request has merge conflicts; rebase, then request again.' \
+              || echo "::warning::could not post the explanation comment"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           head_sha=$(jq -r '.head.sha' pr.json)
           if ! printf '%s' "$head_sha" | grep -qE '^[0-9a-f]{40}$'; then
             echo "could not read the head commit of PR ${PR_NUM} ('$head_sha')"
