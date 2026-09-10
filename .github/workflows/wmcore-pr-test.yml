@@ -51,7 +51,14 @@ on:
 # cancel: throwing away ~25 minutes of the single runner because someone asked
 # for tests while a push-run was in flight is pure loss, and the event name in
 # the group key keeps the two doors from evicting each other either way.
-# An expression is allowed here (workflow-syntax reference, "concurrency").
+# A 'labeled' action must not cancel either, and this is the only place that
+# can stop it: concurrency is a workflow-level key, evaluated when the run is
+# queued, long before any job 'if'. Without the action clause below, adding
+# ANY label to a PR with tests in flight queues a new pull_request run in the
+# same group, cancels ~25 minutes of work, and then skips both of its own jobs
+# on the label guard - the tests would simply vanish.
+# An expression is allowed here (workflow-syntax reference, "concurrency"):
+# github.event.action comes from the github context, which is in scope.
 #
 # There is deliberately NO shared runner group: GitHub keeps only one waiting
 # job per concurrency group and cancels the earlier waiter ("higher priority
@@ -60,7 +67,7 @@ on:
 # which is the serialization we need.
 concurrency:
   group: wmcore-pr-test-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'labeled' }}
 
 # begin posts the 'pending' status; every other write lives in
 # wmcore-pr-report.yml
@@ -164,8 +171,10 @@ jobs:
     # trust gate: same-repo PRs and dispatches always run; a fork PR runs only
     # with the maintainer-set 'safe-to-test' label. begin skips on fork PRs
     # (read-only token), so !cancelled() keeps this job alive past that skip.
-    # The last clause keeps unrelated labels from starting a run (and, with
-    # cancel-in-progress, from cancelling one).
+    # The last clause keeps unrelated labels from STARTING work here. Stopping
+    # a label from CANCELLING work in flight is a different problem and belongs
+    # to cancel-in-progress, which excludes the 'labeled' action; a job 'if' is
+    # evaluated far too late to prevent that.
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.labels.*.name, 'safe-to-test')) && (github.event.action != 'labeled' || github.event.label.name == 'safe-to-test') }}
     runs-on: [self-hosted, Linux, X64]
     # the head-room is for the retry(5) loops
