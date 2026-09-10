@@ -561,6 +561,19 @@ jobs:
           PR_NUM: ${{ inputs.pr_number }}
         run: |
           case "$PR_NUM" in ''|*[!0-9]*) echo "pr_number is not a plain number ('$PR_NUM')"; exit 1;; esac
-          gh workflow run wmcore-pr-report.yml -R "$GITHUB_REPOSITORY" \
-            -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM"
+          # This single API call is the only thing that makes a requested run
+          # reportable: lose it to a transient 5xx and the run finishes silently
+          # with a 'pending' status left on the PR forever. Retry, as the slice
+          # loops in the unit-tests job do.
+          ok=""
+          for attempt in 1 2 3; do
+            if gh workflow run wmcore-pr-report.yml -R "$GITHUB_REPOSITORY" \
+                 -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM"; then
+              ok=1
+              break
+            fi
+            echo "attempt $attempt could not dispatch the report"
+            [ "$attempt" = 3 ] || sleep 15
+          done
+          [ -n "$ok" ] || { echo "could not dispatch the report after 3 attempts - re-run the report workflow by hand with run_id=$GITHUB_RUN_ID pr_number=$PR_NUM"; exit 1; }
           echo "report dispatched for run $GITHUB_RUN_ID, PR $PR_NUM"
