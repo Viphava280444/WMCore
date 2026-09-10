@@ -70,39 +70,66 @@ jobs:
         run: |
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
             test_run_id="$RUN_ID_IN"
-            pr="$PR_IN"
           else
             test_run_id='${{ github.event.workflow_run.id }}'
-            rm -rf pr-context pr-context.zip
-            art_url=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}/artifacts?per_page=100" \
-              | python3 -c 'import json,sys; m=[a for a in json.load(sys.stdin)["artifacts"] if a["name"]=="pr-context"]; print(m[0]["archive_download_url"] if m else "")')
-            if [ -z "$art_url" ]; then
+          fi
+          case "$test_run_id" in ''|*[!0-9]*) echo "run id is not a number ('$test_run_id')"; exit 1;; esac
+          # The run's own pr-context is the only record of WHICH commit was
+          # tested, so read it on every path, the manual one included.
+          pr=''
+          tested_sha=''
+          rm -rf pr-context pr-context.zip
+          art_url=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}/artifacts?per_page=100" \
+            | python3 -c 'import json,sys; m=[a for a in json.load(sys.stdin)["artifacts"] if a["name"]=="pr-context"]; print(m[0]["archive_download_url"] if m else "")')
+          if [ -n "$art_url" ]; then
+            curl -sfL -H "Authorization: Bearer $GH_TOKEN" -o pr-context.zip "$art_url"
+            python3 -c 'import zipfile; zipfile.ZipFile("pr-context.zip").extractall("pr-context")'
+            pr=$(tr -d '[:space:]' < pr-context/pr-number.txt)
+            if [ -f pr-context/pr-head-sha.txt ]; then
+              tested_sha=$(tr -d '[:space:]' < pr-context/pr-head-sha.txt)
+            fi
+          fi
+          if [ -z "$pr" ]; then
+            if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+              echo "No pr-context on run ${test_run_id} - using the dispatch input, with no tested SHA"
+              pr="$PR_IN"
+            else
               echo "No pr-context artifact on run ${test_run_id} (guard-skipped or pre-split run) - nothing to report"
               echo "should=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            curl -sfL -H "Authorization: Bearer $GH_TOKEN" -o pr-context.zip "$art_url"
-            python3 -c 'import zipfile; zipfile.ZipFile("pr-context.zip").extractall("pr-context")'
-            pr=$(tr -d '[:space:]' < pr-context/pr-number.txt)
           fi
-          case "$test_run_id" in ''|*[!0-9]*) echo "run id is not a number ('$test_run_id')"; exit 1;; esac
           case "$pr" in ''|*[!0-9]*) echo "pr-context is not a plain number ('$pr') - refusing"; exit 1;; esac
+          if [ -n "$tested_sha" ] && ! printf '%s' "$tested_sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "pr-context head SHA is not a commit SHA ('$tested_sha') - refusing"
+            exit 1
+          fi
           head_sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${pr}" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          # (i) the artifact is untrusted: what it claims must be what the run
+          # really ran on. Loud, as before - this is the tampering guard.
           if [ "$GITHUB_EVENT_NAME" = "workflow_run" ] && [ "${{ github.event.workflow_run.event }}" = "pull_request" ]; then
-            if [ "$head_sha" != "${{ github.event.workflow_run.head_sha }}" ]; then
-              echo "pr-context names PR ${pr} (head ${head_sha}) but the test run tested ${{ github.event.workflow_run.head_sha }}."
+            claimed="${tested_sha:-$head_sha}"
+            if [ "$claimed" != "${{ github.event.workflow_run.head_sha }}" ]; then
+              echo "pr-context names PR ${pr} (commit ${claimed}) but the test run tested ${{ github.event.workflow_run.head_sha }}."
               echo "Either tampering or a push landed between test and report - refusing to post."
               exit 1
             fi
           fi
+          # (ii) a push after the tests is normal, not an attack: the results
+          # simply describe a commit that is no longer the head. Say so and stop.
+          if [ -n "$tested_sha" ] && [ "$tested_sha" != "$head_sha" ]; then
+            echo "PR head moved after the tests: tested ${tested_sha}, head now ${head_sha}; nothing posted, the new head needs its own run"
+            echo "should=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           echo "PR_NUMBER=${pr}" >> "$GITHUB_ENV"
-          echo "PR_HEAD_SHA=${head_sha}" >> "$GITHUB_ENV"
+          echo "PR_HEAD_SHA=${tested_sha:-$head_sha}" >> "$GITHUB_ENV"
           echo "should=true" >> "$GITHUB_OUTPUT"
           echo "test-run-id=${test_run_id}" >> "$GITHUB_OUTPUT"
-          echo "Reporting on test run ${test_run_id} for PR ${pr} (head ${head_sha})"
+          echo "Reporting on test run ${test_run_id} for PR ${pr} (commit ${tested_sha:-$head_sha})"
 
       # A hosted runner starts clean; the rm keeps this step correct if the job
       # ever moves back to a persistent workspace. KnownFailures.txt is read
@@ -143,6 +170,19 @@ jobs:
           path: LatestPylint
           run-id: ${{ steps.ctx.outputs.test-run-id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # An empty changedFiles.txt is legitimate (a PR touching no python file),
+      # so a report file alone cannot tell "nothing to lint" from "the lint run
+      # died half way". pylintPRTest.sh writes lint-status.txt only when it ran
+      # to the end; without it, drop the report so PullRequestReport.py skips
+      # the Py3 Pylint verdict instead of publishing a green one.
+      - name: Require a complete lint run
+        if: steps.ctx.outputs.should == 'true'
+        run: |
+          if [ -f LatestPylint/pylintpy3Report.json ] && [ ! -f LatestPylint/lint-status.txt ]; then
+            echo "::warning::the lint run did not finish (no lint-status.txt) - no Py3 Pylint verdict will be posted"
+            mv LatestPylint/pylintpy3Report.json LatestPylint/pylintpy3Report.json.incomplete
+          fi
 
       # previous CI: the latest successful baseline run's artifacts.
       # The runs API does not guarantee ordering (seen live: the first item

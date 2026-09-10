@@ -69,14 +69,35 @@ jobs:
                          echo "not authorized to trigger tests - ignoring";;
           esac
 
-      - name: Dispatch the PR tests
+      # The commenter authorized ONE diff: the one at the PR head right now.
+      # Pin that commit and hand it to the test run, so a push landing between
+      # this comment and the tests cannot borrow the authorization, and the
+      # commit statuses land on the commit that was actually tested.
+      - name: Resolve the reviewed PR head
+        id: pr
         if: steps.auth.outputs.ok == 'true'
         run: |
-          gh workflow run wmcore-pr-test.yml -R "$GITHUB_REPOSITORY" -f pr_number="$PR_NUM"
-          echo "dispatched wmcore-pr-test.yml for PR #$PR_NUM"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUM}" > pr.json
+          head_sha=$(jq -r '.head.sha' pr.json)
+          if ! printf '%s' "$head_sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "could not read the head commit of PR ${PR_NUM} ('$head_sha')"
+            exit 1
+          fi
+          echo "PR ${PR_NUM} head is ${head_sha}"
+          echo "head-sha=${head_sha}" >> "$GITHUB_OUTPUT"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the PR tests
+        if: steps.pr.outputs.ok == 'true'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
+        run: |
+          gh workflow run wmcore-pr-test.yml -R "$GITHUB_REPOSITORY" \
+            -f pr_number="$PR_NUM" -f head_sha="$HEAD_SHA"
+          echo "dispatched wmcore-pr-test.yml for PR #$PR_NUM at $HEAD_SHA"
 
       - name: Acknowledge with a rocket reaction
-        if: steps.auth.outputs.ok == 'true'
+        if: steps.pr.outputs.ok == 'true'
         run: |
           gh api -X POST \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \

@@ -13,6 +13,7 @@ Environment Variables:
     CODE_REPO: Code repository name
     WMCORE_REPO: Project name
     PR_NUMBER (optional): PR ID from the CI
+    PR_HEAD_SHA (optional): commit the tests ran on; the statuses land on it
     TargetIssueID (optional)
     BUILD_URL: build URL; for report location
 
@@ -316,7 +317,13 @@ def reportToGithub(py3UnitTestSummary,
     status = issue.create_comment(message)
 
     timeNow = time.strftime("%d %b %Y %H:%M GMT")
-    lastCommit = repo.get_pull(int(issueID)).get_commits().get_page(0)[-1]
+    # The statuses must land on the commit the tests ran on. PR_HEAD_SHA is that
+    # commit, pinned by the workflow when the run started. Without it, fall back
+    # to the PR head: the old get_page(0)[-1] returned the 30th commit of a PR
+    # with more than 30 commits, not its head.
+    pull = repo.get_pull(int(issueID))
+    sha = os.environ.get('PR_HEAD_SHA') or pull.head.sha
+    lastCommit = repo.get_commit(sha)
 
     if pylintSummaryPy3:
         lastCommit.create_status(

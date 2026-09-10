@@ -31,6 +31,9 @@ on:
       pr_number:
         description: 'PR number to test'
         required: true
+      head_sha:
+        description: 'PR head commit the maintainer reviewed; empty = current head'
+        required: false
 
 # Per PR: a new push cancels the running tests. There is deliberately NO shared
 # runner group: GitHub keeps only one waiting job per concurrency group and
@@ -97,6 +100,29 @@ jobs:
         with:
           path: wmcore-src
 
+      - name: Resolve expected PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # payload and inputs go through env, never inline in the script
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA_IN: ${{ inputs.head_sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            sha="$EVENT_HEAD_SHA"
+          elif [ -n "$HEAD_SHA_IN" ]; then
+            sha="$HEAD_SHA_IN"
+          else
+            sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          fi
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "not a commit SHA: '$sha' - refusing to run against an unknown head"
+            exit 1
+          fi
+          echo "PR_HEAD_SHA=${sha}" >> "$GITHUB_ENV"
+          echo "PR ${PR_NUMBER} pinned to head ${sha}"
+
       - name: Report tests started (unchanged PullRequestTestBegin.py)
         env:
           DMWMBOT_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -129,6 +155,32 @@ jobs:
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
+      # twin of the begin job's step: the ONE commit this run is allowed to
+      # test. The test and lint scripts abort if the PR head has moved past it,
+      # and the report workflow posts the statuses on it.
+      - name: Resolve expected PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # payload and inputs go through env, never inline in the script
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA_IN: ${{ inputs.head_sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            sha="$EVENT_HEAD_SHA"
+          elif [ -n "$HEAD_SHA_IN" ]; then
+            sha="$HEAD_SHA_IN"
+          else
+            sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          fi
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "not a commit SHA: '$sha' - refusing to run against an unknown head"
+            exit 1
+          fi
+          echo "PR_HEAD_SHA=${sha}" >> "$GITHUB_ENV"
+          echo "PR ${PR_NUMBER} pinned to head ${sha}"
+
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
@@ -257,6 +309,7 @@ jobs:
               if docker compose exec -T -u "$MY_ID" \
                    -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
                    -e PR_NUMBER="$PR_NUMBER" -e WMCORE_ORG="$WMCORE_ORG" \
+                   -e PR_HEAD_SHA="$PR_HEAD_SHA" \
                    -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                    -e WMCORE_TEST_EXIT_ALARM=10 \
                    -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
@@ -306,7 +359,7 @@ jobs:
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
           docker compose exec -T \
             -e PR_NUMBER="$PR_NUMBER" -e TARGET_BRANCH="$TARGET_BRANCH" \
-            -e WMCORE_ORG="$WMCORE_ORG" \
+            -e WMCORE_ORG="$WMCORE_ORG" -e PR_HEAD_SHA="$PR_HEAD_SHA" \
             -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
           rc=$?
@@ -347,16 +400,21 @@ jobs:
           PR_NUM: ${{ github.event.pull_request.number || inputs.pr_number }}
         run: |
           # wmcore-pr-report.yml (workflow_run) cannot read this run's inputs,
-          # and its event payload omits fork PRs - ship the number as data
+          # and its event payload omits fork PRs - ship the number as data.
+          # The head SHA travels with it, so the report can post the statuses on
+          # the commit that was tested and refuse if the PR has moved on.
           mkdir -p pr-context
           echo "$PR_NUM" > pr-context/pr-number.txt
+          echo "$PR_HEAD_SHA" > pr-context/pr-head-sha.txt
 
       - name: Upload PR context
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pr-context
-          path: pr-context/pr-number.txt
+          path: |
+            pr-context/pr-number.txt
+            pr-context/pr-head-sha.txt
 
       - name: Upload test results
         if: always()
@@ -391,6 +449,7 @@ jobs:
           path: |
             ci-workspace/artifacts/pylintpy3Report.json
             ci-workspace/artifacts/pep8py3.txt
+            ci-workspace/artifacts/lint-status.txt
           if-no-files-found: warn
 
       # the job's verdict: every slice produced a parseable XML and the test
