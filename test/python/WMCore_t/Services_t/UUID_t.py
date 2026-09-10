@@ -26,17 +26,14 @@ class UUIDTest(unittest.TestCase):
 
         listOfIDs = []
 
-        tmpID = makeUUID()
-        splitID = None
-        splitID = tmpID.split('-')
+        refID = makeUUID()
 
         for i in range(0,1000):
             tmpID = makeUUID()
-            tmpSplit = tmpID.split('-')
-            self.assertNotEqual(tmpSplit[1], splitID[1], "Second component of UUID the same %s != %s"
-                             % (tmpSplit[1], splitID[1]))
-            self.assertNotEqual(tmpSplit[4], splitID[4], "Fourth component of UUID the same %s != %s"
-                             % (tmpSplit[4], splitID[4]))
+            # Compare whole UUIDs, never single components: the second
+            # component is 16 random bits, so one of 1000 fresh UUIDs matched
+            # the reference about once in 66 test runs and failed the suite.
+            self.assertNotEqual(tmpID, refID, "UUID identical to the reference: %s" % tmpID)
             self.assertEqual(type(tmpID), str)
             self.assertEqual(listOfIDs.count(tmpID), 0, "UUID repeated!  %s found in list %i times!"
                              % (tmpID, listOfIDs.count(tmpID)))
