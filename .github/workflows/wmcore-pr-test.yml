@@ -456,3 +456,28 @@ jobs:
           [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
           rm -rf "/dev/shm/wmci-mdb-$(id -u)-pl"
           docker ps
+
+  # GitHub emits no workflow_run event for a run that was dispatched with the
+  # repository GITHUB_TOKEN, which is how the "gha test please" trigger starts
+  # this workflow. Those runs would finish silently, so hand the run over to
+  # the report workflow explicitly. Runs started by a person (pull_request
+  # events, or a dispatch with a personal token) keep the workflow_run path and
+  # skip this job, so no run is reported twice. workflow_dispatch runs execute
+  # master's copy of this file, so this job never runs PR-authored code.
+  report-handoff:
+    needs: unit-tests
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the report for this run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ inputs.pr_number }}
+        run: |
+          case "$PR_NUM" in ''|*[!0-9]*) echo "pr_number is not a plain number ('$PR_NUM')"; exit 1;; esac
+          gh workflow run wmcore-pr-report.yml -R "$GITHUB_REPOSITORY" \
+            -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM"
+          echo "report dispatched for run $GITHUB_RUN_ID, PR $PR_NUM"
