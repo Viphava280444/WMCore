@@ -31,7 +31,13 @@ repo = gh.get_repo(repoName)
 issue = repo.get_issue(int(issueID))
 reportURL = os.environ['BUILD_URL']
 
-lastCommit = repo.get_pull(int(issueID)).get_commits().get_page(0)[-1]
+# The status must land on the commit the tests actually run on. PR_HEAD_SHA is
+# that commit, pinned by the workflow when the run started. Without it, fall
+# back to the PR head: the old get_page(0)[-1] returned the 30th commit of a
+# PR with more than 30 commits, not its head.
+pull = repo.get_pull(int(issueID))
+sha = os.environ.get('PR_HEAD_SHA') or pull.head.sha
+lastCommit = repo.get_commit(sha)
 
 lastCommit.create_status(
     state='pending',

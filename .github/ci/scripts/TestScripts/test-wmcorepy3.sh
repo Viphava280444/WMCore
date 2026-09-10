@@ -54,7 +54,19 @@ if [[ ! -z "${PR_NUMBER}" ]]; then
     git config remote.origin.url "$WMCORE_URL"
     git config --add remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
     git fetch --tags --quiet  "$WMCORE_URL" "+refs/pull/*:refs/remotes/origin/pr/*"
-    export COMMIT=`git rev-parse "origin/pr/$PR_NUMBER/merge^{commit}"`
+    # A closed or conflicting PR has no merge ref. `export COMMIT=$(...)` always
+    # returns 0, so even under this script's -e an unresolvable ref would leave
+    # COMMIT empty and the checkout below would silently test master.
+    git rev-parse --verify -q "origin/pr/$PR_NUMBER/merge^{commit}" >/dev/null || { echo "ERROR: no merge ref for PR ${PR_NUMBER}: the PR is closed or has merge conflicts"; exit 1; }
+    # PR_HEAD_SHA is the commit the maintainer reviewed when the run was
+    # requested; second parent of the merge ref is the PR head. If the branch
+    # moved since, this slice would test unreviewed code, so stop instead.
+    if [ -n "${PR_HEAD_SHA:-}" ]; then
+        got=`git rev-parse "origin/pr/$PR_NUMBER/merge^2"`
+        [ "$got" = "$PR_HEAD_SHA" ] || { echo "ERROR: PR head moved since the tests were requested (expected ${PR_HEAD_SHA}, merge ref has ${got}); request the tests again"; exit 1; }
+    fi
+    COMMIT=`git rev-parse "origin/pr/$PR_NUMBER/merge^{commit}"`
+    export COMMIT
     export LATEST_TAG=`git tag |grep BASELINE| sort | tail -1`
     echo "Baseline tag to merge onto: ${LATEST_TAG:-<none found, falling back to master>}"
 

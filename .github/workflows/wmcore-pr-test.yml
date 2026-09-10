@@ -11,35 +11,63 @@
 # Fork PRs: a run started by a fork
 # pull_request gets a read-only token, so THIS workflow only runs the tests
 # and uploads artifacts; wmcore-pr-report.yml posts the comment and statuses
-# afterwards, with a write token. Two gates protect the credentialed runner,
-# both required for a fork PR:
-#   1. repo setting "require approval for workflow runs from all outside
-#      collaborators" - a maintainer releases every push's run;
-#   2. the 'safe-to-test' label, set by a maintainer after reading the diff
-#      (the unit-tests guard checks it).
+# afterwards, with a write token.
+#
+# What actually protects the credentialed runner against a fork PR:
+#   1. the repo setting "require approval for workflow runs from all outside
+#      collaborators". This is the gate that holds: a maintainer releases every
+#      push's run, so no fork code runs unreviewed.
+#   2. the 'safe-to-test' label, checked by the unit-tests guard below. It is
+#      defence in depth, not a second independent gate - by itself a label
+#      cannot decide anything, since only gate 1 stops the run from starting.
+#      To keep the label meaning "this diff", wmcore-pr-label-reset.yml removes
+#      it on every push, and 'labeled' is in the event types so that adding it
+#      back starts the run (other labels are ignored by both jobs).
 # Fallback: a dispatch with pr_number tests any PR with full permissions.
 # A collaborator can also comment "gha test please" on the PR - the
-# wmcore-pr-comment-trigger.yml workflow makes that dispatch.
+# wmcore-pr-comment-trigger.yml workflow makes that dispatch, pinned to the
+# head commit that collaborator saw (head_sha).
 
 name: WMCore PR tests
 
 on:
   pull_request:
     branches: [master]
+    # 'labeled' is not a default type, so without it adding 'safe-to-test' to a
+    # fork PR started nothing and the maintainer had to close and reopen the PR.
+    # Both jobs ignore every label but that one.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
     inputs:
       pr_number:
         description: 'PR number to test'
         required: true
+      head_sha:
+        description: 'PR head commit the maintainer reviewed; empty = current head'
+        required: false
 
-# Per PR: a new push cancels the running tests. There is deliberately NO shared
-# runner group: GitHub keeps only one waiting job per concurrency group and
-# cancels the earlier waiter ("higher priority waiting request"), so a burst
-# of PRs evicted each other. The single self-hosted runner executes one job at
-# a time and queues the rest itself, which is the serialization we need.
+# Per PR and per door. A new push cancels its own PR's running tests, because
+# those results describe a commit nobody will merge. A requested run must NOT
+# cancel: throwing away ~25 minutes of the single runner because someone asked
+# for tests while a push-run was in flight is pure loss, and the event name in
+# the group key keeps the two doors from evicting each other either way.
+# A 'labeled' action must not cancel either, and this is the only place that
+# can stop it: concurrency is a workflow-level key, evaluated when the run is
+# queued, long before any job 'if'. Without the action clause below, adding
+# ANY label to a PR with tests in flight queues a new pull_request run in the
+# same group, cancels ~25 minutes of work, and then skips both of its own jobs
+# on the label guard - the tests would simply vanish.
+# An expression is allowed here (workflow-syntax reference, "concurrency"):
+# github.event.action comes from the github context, which is in scope.
+#
+# There is deliberately NO shared runner group: GitHub keeps only one waiting
+# job per concurrency group and cancels the earlier waiter ("higher priority
+# waiting request"), so a burst of PRs evicted each other. The single
+# self-hosted runner executes one job at a time and queues the rest itself,
+# which is the serialization we need.
 concurrency:
-  group: wmcore-pr-test-${{ github.event.pull_request.number || inputs.pr_number }}
-  cancel-in-progress: true
+  group: wmcore-pr-test-${{ github.event_name }}-${{ github.event.pull_request.number || inputs.pr_number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.event.action != 'labeled' }}
 
 # begin posts the 'pending' status; every other write lives in
 # wmcore-pr-report.yml
@@ -84,8 +112,12 @@ jobs:
   begin:
     # Skip on fork PRs: their runs hold a read-only token, so this status post
     # would fail. Fork PRs simply get no 'pending' mark; the report workflow
-    # posts their results at the end.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # posts their results at the end. A 'labeled' event only counts when the
+    # label is 'safe-to-test' - any other label must not start a run.
+    if: >-
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'safe-to-test')
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 10
     steps:
@@ -96,6 +128,29 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: wmcore-src
+
+      - name: Resolve expected PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # payload and inputs go through env, never inline in the script
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA_IN: ${{ inputs.head_sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            sha="$EVENT_HEAD_SHA"
+          elif [ -n "$HEAD_SHA_IN" ]; then
+            sha="$HEAD_SHA_IN"
+          else
+            sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          fi
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "not a commit SHA: '$sha' - refusing to run against an unknown head"
+            exit 1
+          fi
+          echo "PR_HEAD_SHA=${sha}" >> "$GITHUB_ENV"
+          echo "PR ${PR_NUMBER} pinned to head ${sha}"
 
       - name: Report tests started (unchanged PullRequestTestBegin.py)
         env:
@@ -116,7 +171,11 @@ jobs:
     # trust gate: same-repo PRs and dispatches always run; a fork PR runs only
     # with the maintainer-set 'safe-to-test' label. begin skips on fork PRs
     # (read-only token), so !cancelled() keeps this job alive past that skip.
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.labels.*.name, 'safe-to-test')) }}
+    # The last clause keeps unrelated labels from STARTING work here. Stopping
+    # a label from CANCELLING work in flight is a different problem and belongs
+    # to cancel-in-progress, which excludes the 'labeled' action; a job 'if' is
+    # evaluated far too late to prevent that.
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(github.event.pull_request.labels.*.name, 'safe-to-test')) && (github.event.action != 'labeled' || github.event.label.name == 'safe-to-test') }}
     runs-on: [self-hosted, Linux, X64]
     # the head-room is for the retry(5) loops
     timeout-minutes: 90
@@ -129,6 +188,32 @@ jobs:
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
+      # twin of the begin job's step: the ONE commit this run is allowed to
+      # test. The test and lint scripts abort if the PR head has moved past it,
+      # and the report workflow posts the statuses on it.
+      - name: Resolve expected PR head
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # payload and inputs go through env, never inline in the script
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_SHA_IN: ${{ inputs.head_sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            sha="$EVENT_HEAD_SHA"
+          elif [ -n "$HEAD_SHA_IN" ]; then
+            sha="$HEAD_SHA_IN"
+          else
+            sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+          fi
+          if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
+            echo "not a commit SHA: '$sha' - refusing to run against an unknown head"
+            exit 1
+          fi
+          echo "PR_HEAD_SHA=${sha}" >> "$GITHUB_ENV"
+          echo "PR ${PR_NUMBER} pinned to head ${sha}"
+
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
@@ -257,6 +342,7 @@ jobs:
               if docker compose exec -T -u "$MY_ID" \
                    -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
                    -e PR_NUMBER="$PR_NUMBER" -e WMCORE_ORG="$WMCORE_ORG" \
+                   -e PR_HEAD_SHA="$PR_HEAD_SHA" \
                    -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                    -e WMCORE_TEST_EXIT_ALARM=10 \
                    -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
@@ -306,7 +392,7 @@ jobs:
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
           docker compose exec -T \
             -e PR_NUMBER="$PR_NUMBER" -e TARGET_BRANCH="$TARGET_BRANCH" \
-            -e WMCORE_ORG="$WMCORE_ORG" \
+            -e WMCORE_ORG="$WMCORE_ORG" -e PR_HEAD_SHA="$PR_HEAD_SHA" \
             -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
             wmcore-pr-pylint /home/cmsbld/TestScripts/pylintPRTest.sh
           rc=$?
@@ -347,16 +433,21 @@ jobs:
           PR_NUM: ${{ github.event.pull_request.number || inputs.pr_number }}
         run: |
           # wmcore-pr-report.yml (workflow_run) cannot read this run's inputs,
-          # and its event payload omits fork PRs - ship the number as data
+          # and its event payload omits fork PRs - ship the number as data.
+          # The head SHA travels with it, so the report can post the statuses on
+          # the commit that was tested and refuse if the PR has moved on.
           mkdir -p pr-context
           echo "$PR_NUM" > pr-context/pr-number.txt
+          echo "$PR_HEAD_SHA" > pr-context/pr-head-sha.txt
 
       - name: Upload PR context
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: pr-context
-          path: pr-context/pr-number.txt
+          path: |
+            pr-context/pr-number.txt
+            pr-context/pr-head-sha.txt
 
       - name: Upload test results
         if: always()
@@ -391,6 +482,7 @@ jobs:
           path: |
             ci-workspace/artifacts/pylintpy3Report.json
             ci-workspace/artifacts/pep8py3.txt
+            ci-workspace/artifacts/lint-status.txt
           if-no-files-found: warn
 
       # the job's verdict: every slice produced a parseable XML and the test
@@ -456,3 +548,41 @@ jobs:
           [ -n "$ids" ] && docker rm -f $ids 2>/dev/null || true
           rm -rf "/dev/shm/wmci-mdb-$(id -u)-pl"
           docker ps
+
+  # GitHub emits no workflow_run event for a run that was dispatched with the
+  # repository GITHUB_TOKEN, which is how the "gha test please" trigger starts
+  # this workflow. Those runs would finish silently, so hand the run over to
+  # the report workflow explicitly. Runs started by a person (pull_request
+  # events, or a dispatch with a personal token) keep the workflow_run path and
+  # skip this job, so no run is reported twice. workflow_dispatch runs execute
+  # master's copy of this file, so this job never runs PR-authored code.
+  report-handoff:
+    needs: unit-tests
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch the report for this run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUM: ${{ inputs.pr_number }}
+        run: |
+          case "$PR_NUM" in ''|*[!0-9]*) echo "pr_number is not a plain number ('$PR_NUM')"; exit 1;; esac
+          # This single API call is the only thing that makes a requested run
+          # reportable: lose it to a transient 5xx and the run finishes silently
+          # with a 'pending' status left on the PR forever. Retry, as the slice
+          # loops in the unit-tests job do.
+          ok=""
+          for attempt in 1 2 3; do
+            if gh workflow run wmcore-pr-report.yml -R "$GITHUB_REPOSITORY" \
+                 -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM"; then
+              ok=1
+              break
+            fi
+            echo "attempt $attempt could not dispatch the report"
+            [ "$attempt" = 3 ] || sleep 15
+          done
+          [ -n "$ok" ] || { echo "could not dispatch the report after 3 attempts - re-run the report workflow by hand with run_id=$GITHUB_RUN_ID pr_number=$PR_NUM"; exit 1; }
+          echo "report dispatched for run $GITHUB_RUN_ID, PR $PR_NUM"

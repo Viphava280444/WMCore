@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
 
+# No 'set -e' on purpose: pycodestyle and pylint exit non-zero whenever they
+# find something, and this script is expected to keep going and report it.
+# pipefail only makes a failing left-hand side of a pipe visible.
+set -o pipefail
+
 WORKDIR=/home/cmsbld
 
 if [ -z "$PR_NUMBER" -o -z "$TARGET_BRANCH" ]; then
@@ -21,7 +26,20 @@ export PYTHONPATH=`pwd`/test/python:`pwd`/src/python:$PYTHONPATH
 # Figure out the one commit we are interested in and what happens to the repo if we were to merge it
 git config remote.origin.url "https://github.com/${WMCORE_ORG:-dmwm}/WMCore.git"
 git fetch origin pull/${PR_NUMBER}/merge:PR_MERGE
-export COMMIT=`git rev-parse "PR_MERGE^{commit}"`
+# A closed or conflicting PR has no merge ref. Without this check the rev-parse
+# below prints nothing, COMMIT stays empty and every git command after it acts
+# on the target branch, so the whole run lints the wrong tree and looks clean.
+git rev-parse --verify -q "PR_MERGE^{commit}" >/dev/null || { echo "ERROR: no merge ref for PR ${PR_NUMBER}: the PR is closed or has merge conflicts"; exit 1; }
+# PR_HEAD_SHA is the commit the maintainer reviewed when the run was requested.
+# If the branch moved since, this run would lint unreviewed code, so stop.
+if [ -n "${PR_HEAD_SHA:-}" ]; then
+  got=$(git rev-parse "PR_MERGE^2")
+  [ "$got" = "$PR_HEAD_SHA" ] || { echo "ERROR: PR head moved since the tests were requested (expected ${PR_HEAD_SHA}, merge ref has ${got}); request the tests again"; exit 1; }
+fi
+# split assignment: `export COMMIT=$(...)` always returns 0, so a failing
+# rev-parse would go unnoticed even under 'set -e'
+COMMIT=$(git rev-parse "PR_MERGE^{commit}") || exit 1
+export COMMIT
 git checkout ${TARGET_BRANCH}
 git pull
 
@@ -58,5 +76,12 @@ cp *.json $WORKDIR/artifacts/
 touch NOTHING # If changedFiles.txt is empty, this will keep it from parsing the whole directory tree
 pycodestyle NOTHING `< changedFiles.txt` > ${PEP8_FILENAME}
 cp ${PEP8_FILENAME} $WORKDIR/artifacts/
+
+# Completion marker. An empty changedFiles.txt is legitimate (a PR that touches
+# no python file), so the report cannot tell "nothing to lint" from "the lint
+# run died half way" by looking at the report file alone. This marker is only
+# written when the script ran to the end; the report job refuses to publish a
+# Py3 Pylint verdict without it.
+echo ok > $WORKDIR/artifacts/lint-status.txt
 
 popd
