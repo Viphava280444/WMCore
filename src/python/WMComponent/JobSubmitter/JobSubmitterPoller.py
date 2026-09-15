@@ -38,7 +38,7 @@ from WMCore.Services.TagCollector.TagCollector import TagCollector
 from WMComponent.JobSubmitter.JobSubmitAPI import availableScheddSlots
 
 
-def jobSubmitCondition(jobStats):
+def jobSubmitCondition67800(jobStats):
     for jobInfo in jobStats:
         if jobInfo["Current"] >= jobInfo["Threshold"]:
             return jobInfo["Condition"]
