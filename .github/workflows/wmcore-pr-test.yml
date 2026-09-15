@@ -4,7 +4,7 @@
 #
 # Fork differences, on purpose:
 #   - one job runs three isolated test stacks in parallel on the self-hosted runner
-#   - lint runs beside the stacks; the run summary lives in wmcore-pr-report.yml
+#   - lint runs beside the stacks; the comment and statuses come from wmcore-pr-report.yml
 #   - stacks reach the internet through a per-stack host proxy on a unix socket
 #   - dummy secrets and a self-signed cert; DMWMBOT_TOKEN is the own GITHUB_TOKEN
 #
