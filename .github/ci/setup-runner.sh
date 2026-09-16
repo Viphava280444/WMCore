@@ -74,9 +74,6 @@ Optional. To run the tests with real grid credentials, place here BY HAND:
   usercert.pem       (mode 644)  your grid certificate
   userkey.pem        (mode 400)  its key, passphrase-free
   rucio_account.txt  one line: the rucio account name
-The Tier-0 SSH check (t0-ssh-check.yml) reads one more file from this same
-directory; the unit tests do not need it:
-  cmst0.keytab       (mode 400)  kerberos keytab for the cmst0 principal
 Never commit these anywhere. Without them the CI generates a self-signed
 pair and the extra environment failures are forgiven by the baseline diff.
 EOF
