@@ -243,6 +243,8 @@ jobs:
                        "Fix or dispatch the 'WMCore baseline' workflow before trusting PR verdicts.")
           with open(os.environ['GITHUB_OUTPUT'], 'a') as fh:
               fh.write(f"run-id={newest['id']}\n")
+              fh.write(f"created={newest['created_at']}\n")
+              fh.write(f"age-hours={age_h:.1f}\n")
           EOF
 
       - name: Fetch baseline results (MasterUnitTests)
@@ -320,3 +322,88 @@ jobs:
           curl -sf --retry 3 --retry-all-errors -X POST -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${PR_HEAD_SHA}" \
             -d "{\"state\": \"${state}\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Build finished at $(date -u '+%d %b %Y %H:%M GMT')\"}"
+
+      # Run-page summary: the same facts as the PR comment, plus the names of
+      # the tests behind the counts, so nobody has to download the artifact for
+      # the common questions. The verdict is quoted from PullRequestReport.py's
+      # printed dict, never recomputed. Rendering problems only warn.
+      - name: Write run summary
+        if: always() && steps.ctx.outputs.should == 'true'
+        env:
+          BASELINE_RUN: ${{ steps.baseline.outputs.run-id }}
+          BASELINE_CREATED: ${{ steps.baseline.outputs.created }}
+          BASELINE_AGE_H: ${{ steps.baseline.outputs.age-hours }}
+        run: |
+          python3 - <<'EOF' || echo "::warning::run-summary rendering failed; the PR comment and statuses are unaffected"
+          import ast, glob, html, os, re
+          try:
+              from defusedxml import ElementTree as ET
+          except ImportError:
+              import xml.etree.ElementTree as ET
+
+          tests = failures = errors = skipped = 0
+          for f in glob.glob('LatestUnitTests/**/nosetests*.xml', recursive=True):
+              try:
+                  root = ET.parse(f).getroot()
+              except Exception:
+                  continue
+              for s in ([root] if root.tag == 'testsuite' else root.findall('testsuite')):
+                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
+                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
+
+          gate = None
+          try:
+              m = re.search(r'Python3 Unit Test summary (\{.*\})',
+                            open('report-stdout.txt', encoding='utf-8', errors='replace').read())
+              gate = ast.literal_eval(m.group(1)) if m else None
+          except Exception:
+              pass
+
+          # names behind the counts, from the rendered report
+          sections = {}
+          try:
+              text = open('artifacts/PullRequestReport.html', encoding='utf-8', errors='replace').read()
+              text = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', ' ', text)))
+              heads = ['New failures of unit tests', 'Unit tests added', 'Unit tests deleted',
+                       'Unstable unit tests changed', 'Changed unit tests', 'Summary of Python3 pylint report',
+                       'Warnings from pylint by file and severity', 'Warnings from pycodestyle']
+              pos = sorted([(text.find(h), h) for h in heads if text.find(h) >= 0])
+              for i, (p, h) in enumerate(pos):
+                  end = pos[i + 1][0] if i + 1 < len(pos) else len(text)
+                  sections[h] = text[p + len(h):end]
+          except Exception:
+              pass
+
+          def flips(key):
+              return re.findall(r'([A-Za-z0-9_.]+:[A-Za-z0-9_]+) changed from (\w+) to (\w+)', sections.get(key, ''))
+
+          pr = os.environ.get('PR_NUMBER', '?'); sha = os.environ.get('PR_HEAD_SHA', '')[:9]
+          L = ['## WMCore PR test results: PR #%s, commit `%s`' % (pr, sha), '']
+          if gate is not None:
+              nf = gate.get('newFailures')
+              L.append('**Verdict: %s** (report counters: `%s`)' % (
+                  'PASS, 0 new failures' if nf == 0 else '%s new failure(s)' % nf, gate))
+          else:
+              L.append('**Verdict unavailable**: the report step did not print its summary dict; the commit statuses are the authority.')
+          if os.environ.get('BASELINE_RUN'):
+              L.append('Baseline: run %s, created %s, age %s h' % (
+                  os.environ['BASELINE_RUN'], os.environ.get('BASELINE_CREATED', '?'), os.environ.get('BASELINE_AGE_H', '?')))
+          L += ['', '| Tests | Failures | Errors | Skipped |', '|---|---|---|---|',
+                '| %d | %d | %d | %d |' % (tests, failures, errors, skipped), '',
+                'Failures and errors that also occur on master do not count; only tests that pass on master and fail here do.', '']
+          for title, key in (('New failures (must be resolved)', 'New failures of unit tests'),
+                             ('Tests no longer failing', 'Changed unit tests'),
+                             ('Unstable tests that flipped (forgiven)', 'Unstable unit tests changed'),
+                             ('Tests added', 'Unit tests added'), ('Tests deleted', 'Unit tests deleted')):
+              items = flips(key)
+              if items:
+                  L += ['### %s: %d' % (title, len(items))] + ['- `%s` (%s to %s)' % t for t in items] + ['']
+          py = sections.get('Summary of Python3 pylint report', '').strip()
+          if py:
+              L += ['### Pylint', py[:700].strip(), '']
+          if os.path.exists('LatestPylint/pep8py3.txt'):
+              L.append('pycodestyle: %d comments to review (informational)' % sum(1 for _ in open('LatestPylint/pep8py3.txt')))
+          L += ['', 'Full report: artifact `pr-report` on this run.']
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
+              out.write('\n'.join(L) + '\n')
+          EOF
