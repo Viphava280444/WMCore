@@ -42,18 +42,14 @@ the script writes a README there naming the exact files. The rucio
 account's DN registrations (e.g. `wma_test`) are admin requests, not
 files.
 
-The same secrets dir also holds `cmst0.keytab`, which only the Tier-0 SSH
-check (`t0-ssh-check.yml`) reads; the test workflows ignore it.
-
 ## Paths and multiple runners
 
 The scripts come from the repo checkout, so no script path exists on the
 VM at all. The only VM path the workflows know is the optional secrets
 dir; a runner with a different one sets the repo Actions variable
 `WMCI_SECRETS_DIR` (Settings > Secrets and variables > Actions >
-Variables). That one variable moves the whole dir - the grid pair, the
-rucio account file and the Tier-0 keytab all have to live under the new
-path. Variables are repo-wide, so a fleet of runners should use the same
+Variables). That one variable moves the whole dir - the grid pair and the
+rucio account file have to live under the new path. Variables are repo-wide, so a fleet of runners should use the same
 path convention on every VM.
 
 A runner that has an extra library directory to put on the test
