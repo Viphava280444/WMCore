@@ -107,6 +107,20 @@ jobs:
             echo "ok=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # The whole pipeline is master-only: the slices merge the PR onto the
+          # newest master BASELINE_* tag, the report compares against a master
+          # baseline and the lint container diffs against master. A PR based on
+          # another branch would be scored against every master<->base
+          # difference, so say that here instead of posting a bogus verdict.
+          base=$(jq -r '.base.ref' pr.json)
+          if [ "$base" != "master" ]; then
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+              -f body="gha test please: this pull request targets ${base}, not master; these tests only run against master." \
+              || echo "::warning::could not post the explanation comment"
+            echo "PR ${PR_NUM} targets ${base}, not master - nothing started"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           head_sha=$(jq -r '.head.sha' pr.json)
           if ! printf '%s' "$head_sha" | grep -qE '^[0-9a-f]{40}$'; then
             echo "could not read the head commit of PR ${PR_NUM} ('$head_sha')"
