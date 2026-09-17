@@ -33,7 +33,7 @@ permissions:
   # the explanation comment and the reaction: a PR conversation comment IS an
   # issue comment, so both endpoints live under 'issues'
   issues: write
-  pull-requests: read   # GET /pulls/{n} for state, mergeable, base and head
+  pull-requests: write  # reactions on PR comments need write (issues: write is not enough); also GET /pulls/{n}
   statuses: read        # is a run for this commit already in flight?
   contents: read
 
