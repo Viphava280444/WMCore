@@ -4,8 +4,11 @@ programs no NAT (iptables:false): bridge containers cannot reach the outside,
 but they CAN reach the host. This proxy runs on the host during a CI job and
 gives containers HTTPS (CONNECT tunnel) and plain-HTTP egress. stdlib only.
 
-Usage: ci-proxy.py PORT   (binds 0.0.0.0:PORT; Ctrl-C / SIGTERM to stop)
+Usage: ci-proxy.py SOCKET_PATH|PORT   (Ctrl-C / SIGTERM to stop)
+An argument containing '/' selects the unix-socket mode the workflows use;
+a bare number binds 0.0.0.0:PORT, which this VM's nftables rules block.
 """
+import ipaddress
 import select
 import signal
 import socket
@@ -30,6 +33,30 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
 OPENER = urllib.request.build_opener(NoRedirect)
 
 
+def resolve_allowed(host, port):
+    """Resolve a destination and refuse the host-local ones.
+
+    The VM gives the containers no route of their own on purpose (docker with
+    iptables:false, nftables dropping FORWARD and INPUT), so this proxy is
+    their only way out - and therefore the only place that can say no. Web
+    egress to real internet addresses is the whole point of the proxy and
+    stays open; what a container must not be able to ask for is the host
+    itself, i.e. loopback services and the link-local metadata address.
+
+    Checks the RESOLVED addresses, not the hostname string: a name check is
+    defeated by a name that resolves to 127.0.0.1, and misses '[::1]' and
+    integer-encoded literals. Returns the getaddrinfo list so the caller can
+    dial an address that was actually checked.
+    """
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    for info in infos:
+        addr = ipaddress.ip_address(info[4][0])
+        if (addr.is_loopback or addr.is_link_local or addr.is_multicast
+                or addr.is_reserved or addr.is_unspecified):
+            raise PermissionError(f"host-local destination {addr} is not proxied")
+    return infos
+
+
 class Handler(socketserver.StreamRequestHandler):
     timeout = 120
 
@@ -52,9 +79,29 @@ class Handler(socketserver.StreamRequestHandler):
         except Exception as exc:  # pylint: disable=broad-exception-caught; the proxy must never crash the job
             print(f"proxy error: {exc}", flush=True)
 
+    def deny(self, what, exc):
+        print(f"proxy refused {what}: {exc}", flush=True)
+        self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n'
+                         b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+
     def tunnel(self, target):
         host, _, port = target.rpartition(':')
-        upstream = socket.create_connection((host, int(port or 443)), timeout=30)
+        host = host.strip('[]')          # IPv6 literal
+        try:
+            infos = resolve_allowed(host, int(port or 443))
+        except PermissionError as exc:
+            self.deny(f"CONNECT {target}", exc)
+            return
+        upstream = None
+        last = None
+        for info in infos:
+            try:
+                upstream = socket.create_connection(info[4][:2], timeout=30)
+                break
+            except OSError as exc:
+                last = exc
+        if upstream is None:
+            raise last or OSError(f"could not connect to {target}")
         self.wfile.write(b'HTTP/1.1 200 Connection established\r\n\r\n')
         self.wfile.flush()
         conns = [self.connection, upstream]
@@ -75,10 +122,19 @@ class Handler(socketserver.StreamRequestHandler):
         # Only proxy web egress. Refuse file://, ftp://, data:// etc, since a
         # container could otherwise ask this proxy to read a local file
         # (e.g. the mounted grid key).
-        if urllib.parse.urlsplit(target).scheme.lower() not in ('http', 'https'):
-            self.wfile.write(b'HTTP/1.1 403 Forbidden\r\n'
-                             b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+        parts = urllib.parse.urlsplit(target)
+        if parts.scheme.lower() not in ('http', 'https'):
+            self.deny(f"{method} {target}", 'only http and https are proxied')
             return
+        # and only to destinations that are not the host itself
+        try:
+            resolve_allowed(parts.hostname, parts.port or
+                            (443 if parts.scheme.lower() == 'https' else 80))
+        except PermissionError as exc:
+            self.deny(f"{method} {target}", exc)
+            return
+        except OSError:
+            pass                         # unresolvable: let urllib report it
         req = urllib.request.Request(target, method=method)
         for raw in headers:
             try:
