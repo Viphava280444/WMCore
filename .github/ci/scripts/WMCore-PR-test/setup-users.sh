@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 
 thisUser=$MY_USER
 thisGroup=$MY_GROUP

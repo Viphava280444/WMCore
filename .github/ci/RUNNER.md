@@ -25,11 +25,12 @@ idempotent: when it stops on a missing prerequisite, fix that and re-run.
 | docker + compose v2 | test containers | runner user in `docker` group |
 | /dev/shm, 4 GB+ | MariaDB data on RAM | per-stack dirs, auto-cleaned |
 | /etc/grid-security/certificates | CA bundle mount | standard on CERN VMs |
+| /cvmfs/cms.cern.ch | CMS environment inside the containers | bind-mounted; `test-wmcorepy3.sh` sources `cmsset_default.sh`, so without it every slice aborts at startup |
 | python3, git, curl, openssl | glue | stock on AlmaLinux |
 
 No NAT or firewall change is needed: containers run on a private bridge
 and reach the internet through a unix-socket proxy served by the job
-(`ci-proxy.py`). No cvmfs. Ports 3306/5984 stay free because every stack
+(`ci-proxy.py`). Ports 3306/5984 stay free because every stack
 runs in its own network namespace.
 
 ## Credentialed mode (optional)
