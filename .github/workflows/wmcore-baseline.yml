@@ -111,8 +111,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     outputs:
-      # the commit the stacks synced their clone to; tag-baseline tags THIS,
-      # not whatever master has become by the time the tests finish
+      # the commit every slice is pinned to (hard-sync plus WMCORE_PINNED_SHA
+      # below); tag-baseline tags THIS, not whatever master has become by the
+      # time the tests finish
       baseline-sha: ${{ steps.base.outputs.sha }}
     env:
       STACK1_SLICES: '1 2 5 10 12'
@@ -137,8 +138,9 @@ jobs:
         with:
           path: wmcore-src
 
-      # the commit under test: the stacks hard-sync their clone to origin/master
-      # moments after this, so this SHA is the one the tag must name
+      # the commit under test: resolved ONCE here and forced on every stack and
+      # every slice below, so this SHA is what the tests ran and what the tag
+      # names
       - name: Resolve the master commit under test
         id: base
         run: |
@@ -192,6 +194,10 @@ jobs:
       # below does - so a teardown hiccup cannot turn a complete run red.
       - name: Run 3 stacks in parallel
         id: stacks
+        env:
+          # the ONE commit this whole run tests; the stack runner script below
+          # reads it from the environment
+          BASELINE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -248,16 +254,20 @@ jobs:
             # the old silent-merge default
             git config --file "$GIT_CONFIG_GLOBAL" pull.rebase false
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
-          # Hard-sync the image's cached clone to fork master BEFORE the
-          # unchanged script's `git pull origin master`: once master moves past
-          # the baked-in state, that pull diverges and git refuses it, which
-          # kills every slice.
+          # Hard-sync the image's cached clone BEFORE the unchanged script's
+          # `git pull origin master`: once master moves past the baked-in
+          # state, that pull diverges and git refuses it, which kills every
+          # slice. Sync to the RESOLVED sha, not to FETCH_HEAD: the three
+          # stacks start 0/20/40 s apart and a run lasts 25-45 min, so
+          # whatever origin/master happens to be at each stack's own start is
+          # not necessarily the commit tag-baseline will tag.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            -e BASELINE_SHA="$BASELINE_SHA" \
             -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" bash -c '
             cd /home/cmsbld/WMCore
             git fetch origin master
-            git checkout -q -B master FETCH_HEAD'
+            git checkout -q -B master "$BASELINE_SHA"'
           stack_start=$(date +%s)
           for S in $SLICE_LIST; do
             s0=$(date +%s)
@@ -267,6 +277,7 @@ jobs:
             if docker compose exec -T -u "$MY_ID" \
                  -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
                  -e WMCORE_ORG="$WMCORE_ORG" \
+                 -e WMCORE_PINNED_SHA="$BASELINE_SHA" \
                  -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                  -e WMCORE_TEST_EXIT_ALARM=10 \
                  -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
