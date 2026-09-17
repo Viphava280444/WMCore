@@ -245,6 +245,34 @@ jobs:
           echo "PR_HEAD_SHA=${sha}" >> "$GITHUB_ENV"
           echo "PR ${PR_NUMBER} pinned to head ${sha}"
 
+      # Right after the head is known, and before anything else can fail: this
+      # artifact is what lets wmcore-pr-report.yml give the PR a terminal
+      # status. Uploaded late, a job dying in setup shipped none, and the
+      # report then found nothing to report and left the begin job's 'pending'
+      # status on the PR for good.
+      - name: Record PR context for the report workflow
+        if: always()
+        env:
+          # via env, never inline in the script (injection guard)
+          PR_NUM: ${{ github.event.pull_request.number || inputs.pr_number }}
+        run: |
+          # wmcore-pr-report.yml (workflow_run) cannot read this run's inputs,
+          # and its event payload omits fork PRs - ship the number as data.
+          # The head SHA travels with it, so the report can post the statuses on
+          # the commit that was tested and refuse if the PR has moved on.
+          mkdir -p pr-context
+          echo "$PR_NUM" > pr-context/pr-number.txt
+          echo "$PR_HEAD_SHA" > pr-context/pr-head-sha.txt
+
+      - name: Upload PR context
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-context
+          path: |
+            pr-context/pr-number.txt
+            pr-context/pr-head-sha.txt
+
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
@@ -460,29 +488,6 @@ jobs:
           cp ci-stack-*/artifacts/nosetestspy3-*.xml unit-test-xml/ 2>/dev/null || true
           cat ci-stack-*/artifacts/stack-timing.txt > stack-timing.txt 2>/dev/null || true
           ls -l unit-test-xml
-
-      - name: Record PR context for the report workflow
-        if: always()
-        env:
-          # via env, never inline in the script (injection guard)
-          PR_NUM: ${{ github.event.pull_request.number || inputs.pr_number }}
-        run: |
-          # wmcore-pr-report.yml (workflow_run) cannot read this run's inputs,
-          # and its event payload omits fork PRs - ship the number as data.
-          # The head SHA travels with it, so the report can post the statuses on
-          # the commit that was tested and refuse if the PR has moved on.
-          mkdir -p pr-context
-          echo "$PR_NUM" > pr-context/pr-number.txt
-          echo "$PR_HEAD_SHA" > pr-context/pr-head-sha.txt
-
-      - name: Upload PR context
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-context
-          path: |
-            pr-context/pr-number.txt
-            pr-context/pr-head-sha.txt
 
       - name: Upload test results
         if: always() && steps.stacks.conclusion != 'skipped'
