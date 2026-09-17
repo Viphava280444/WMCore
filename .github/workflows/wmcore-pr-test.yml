@@ -534,9 +534,16 @@ jobs:
   # events, or a dispatch with a personal token) keep the workflow_run path and
   # skip this job, so no run is reported twice. workflow_dispatch runs execute
   # master's copy of this file, so this job never runs PR-authored code.
+  #
+  # always(), not !cancelled(): a cancelled run (manual Cancel, or the single
+  # runner going away mid-job) is exactly the case that must still be handed
+  # over. !cancelled() skipped this job, so the 'pending' status the begin job
+  # posted stayed on the PR with no run in flight and no way back except a
+  # fresh run. always() is the only condition that still executes a job after
+  # the run was cancelled, and this one is bounded by timeout-minutes below.
   report-handoff:
     needs: unit-tests
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -546,6 +553,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ inputs.pr_number }}
+          # what became of the tests. The report has no workflow_run payload on
+          # this door, so without this it would treat a cancelled run as a
+          # completed one and fail on the 14/14 slice gate instead of posting
+          # the terminal 'error' status the PR needs.
+          TEST_CONCLUSION: ${{ needs.unit-tests.result }}
         run: |
           case "$PR_NUM" in ''|*[!0-9]*) echo "pr_number is not a plain number ('$PR_NUM')"; exit 1;; esac
           # This single API call is the only thing that makes a requested run
@@ -555,7 +567,8 @@ jobs:
           ok=""
           for attempt in 1 2 3; do
             if gh workflow run wmcore-pr-report.yml -R "$GITHUB_REPOSITORY" \
-                 -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM"; then
+                 -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM" \
+                 -f conclusion="$TEST_CONCLUSION"; then
               ok=1
               break
             fi
