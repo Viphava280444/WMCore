@@ -85,6 +85,24 @@ jobs:
             test_run_id='${{ github.event.workflow_run.id }}'
           fi
           case "$test_run_id" in ''|*[!0-9]*) echo "run id is not a number ('$test_run_id')"; exit 1;; esac
+          # Digits alone are not enough. A maintainer pasting a BASELINE run id
+          # from the Actions list would have this job compare that baseline
+          # against itself - no pr-context, so the PR head is taken as the
+          # tested commit, 14/14 slices on both sides, zero new failures - and
+          # post a green verdict on a commit nothing tested. Refuse a run that
+          # is not a finished run of the PR test workflow.
+          run_json=$(curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}")
+          wf_path=$(printf '%s' "$run_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("path",""))')
+          run_status=$(printf '%s' "$run_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')
+          if [ "$wf_path" != ".github/workflows/wmcore-pr-test.yml" ]; then
+            echo "run ${test_run_id} belongs to '${wf_path}', not the PR test workflow - refusing"
+            exit 1
+          fi
+          if [ "$run_status" != "completed" ]; then
+            echo "run ${test_run_id} is '${run_status}', not completed - refusing to report on it"
+            exit 1
+          fi
           # The run's own pr-context is the only record of WHICH commit was
           # tested, so read it on every path, the manual one included.
           pr=''
@@ -332,11 +350,12 @@ jobs:
           # throwaway copy and leave the checked-out script untouched.
           cp "$WMCI_SCRIPTS_DIR/ContainerScripts/PullRequestReport.py" \
              "$RUNNER_TEMP/PullRequestReport.py"
-          # Delta-aware pylint gate (fail only on NEW W/E); fetch the patcher
-          # from master since this workflow checks out no code.
-          curl -sf -o "$RUNNER_TEMP/patch-pylint-delta.py" \
-            "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/master/.github/ci/patch-pylint-delta.py"
-          python3 "$RUNNER_TEMP/patch-pylint-delta.py" "$RUNNER_TEMP/PullRequestReport.py"
+          # Delta-aware pylint gate (fail only on NEW W/E). It comes from the
+          # same checkout as the script it patches: the raw.githubusercontent
+          # copy was a needless network dependency that aborts this step under
+          # bash -e, and its CDN cache could serve a patcher older than the
+          # PullRequestReport.py it is anchored to.
+          python3 "$WMCI_SCRIPTS_DIR/../patch-pylint-delta.py" "$RUNNER_TEMP/PullRequestReport.py"
           # tee the output: the run-summary step reads the printed summary
           # dict instead of recomputing the gate. pipefail keeps a crash fatal.
           set -o pipefail
