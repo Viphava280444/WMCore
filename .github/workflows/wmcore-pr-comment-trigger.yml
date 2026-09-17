@@ -29,20 +29,22 @@ on:
     types: [created]
 
 permissions:
-  actions: write         # dispatch wmcore-pr-test.yml
-  issues: write          # react to comments on plain issues
-  pull-requests: write   # react to comments on PRs
+  actions: write        # dispatch wmcore-pr-test.yml
+  # the explanation comment and the reaction: a PR conversation comment IS an
+  # issue comment, so both endpoints live under 'issues'
+  issues: write
+  pull-requests: read   # GET /pulls/{n} for state, mergeable, base and head
   contents: read
 
 jobs:
   trigger:
-    # cheap pre-filter; the case-insensitive match and the permission
-    # check below are the real gates
+    # cheap pre-filter; the own-line match and the permission check below are
+    # the real gates. contains() is case-insensitive, so one spelling covers
+    # every capitalization - do not add more.
     if: >-
       github.event.issue.pull_request != null &&
       github.event.comment.user.type != 'Bot' &&
-      (contains(github.event.comment.body, 'gha test please') ||
-       contains(github.event.comment.body, 'GHA test please'))
+      contains(github.event.comment.body, 'gha test please')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -68,7 +70,22 @@ jobs:
         id: auth
         if: steps.match.outputs.ok == 'true'
         run: |
-          perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" --jq .permission || echo none)
+          # This endpoint answers 200 with 'read' for a non-collaborator, so a
+          # denial never comes out as an error. Masking errors as 'none' (the
+          # old '|| echo none') therefore only ever turned a 5xx, a rate limit
+          # or a DNS hiccup into a silent "not authorized", logged as a
+          # permission problem. Fail loudly instead; only a nonexistent login,
+          # which a commenter cannot be, is tolerated as a real 'none'.
+          if ! perm=$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${COMMENTER}/permission" \
+                        --jq .permission 2>"$RUNNER_TEMP/perm-err.txt"); then
+            if grep -q 'HTTP 404' "$RUNNER_TEMP/perm-err.txt"; then
+              perm=none
+            else
+              echo "::error::permission lookup for ${COMMENTER} failed - not a denial"
+              cat "$RUNNER_TEMP/perm-err.txt"
+              exit 1
+            fi
+          fi
           echo "commenter ${COMMENTER} has permission: ${perm}"
           case "$perm" in
             admin|write) echo "ok=true"  >> "$GITHUB_OUTPUT";;
@@ -130,8 +147,40 @@ jobs:
           echo "head-sha=${head_sha}" >> "$GITHUB_OUTPUT"
           echo "ok=true" >> "$GITHUB_OUTPUT"
 
-      - name: Dispatch the PR tests
+      # One request, one run. Requested runs are deliberately never cancelled
+      # by concurrency, so a repeated sentence (seen: the same comment 23 s
+      # apart) queued a second identical run and spent ~26 min of the only
+      # runner testing one commit twice, while another PR's ready tests waited
+      # half an hour behind it. The begin job's 'pending' status on this exact
+      # commit is the marker that a run is already in flight.
+      #
+      # It is a ~1 min window, not a lock: two comments seconds apart can still
+      # both get through, and a deliberate re-test of the same commit is a
+      # manual wmcore-pr-test.yml dispatch, which does not pass through here.
+      - name: Skip a duplicate request
+        id: dedupe
         if: steps.pr.outputs.ok == 'true'
+        env:
+          HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" > status.json
+          pending=$(jq '[.statuses[] | select(.state == "pending")] | length' status.json)
+          if [ "${pending:-0}" -gt 0 ]; then
+            target=$(jq -r '[.statuses[] | select(.state == "pending")][0].target_url // ""' status.json)
+            gh api -X POST \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+              -f content=eyes || echo "::warning::could not add the reaction"
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+              -f body="gha test please: tests for ${HEAD_SHA} are already running (${target:-see the checks on this commit}); nothing started." \
+              || echo "::warning::could not post the explanation comment"
+            echo "a run for ${HEAD_SHA} is already in flight - not dispatching a duplicate"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch the PR tests
+        if: steps.dedupe.outputs.ok == 'true'
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
         run: |
@@ -140,7 +189,7 @@ jobs:
           echo "dispatched wmcore-pr-test.yml for PR #$PR_NUM at $HEAD_SHA"
 
       - name: Acknowledge with a rocket reaction
-        if: steps.pr.outputs.ok == 'true'
+        if: steps.dedupe.outputs.ok == 'true'
         run: |
           gh api -X POST \
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
