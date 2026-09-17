@@ -90,17 +90,17 @@ jobs:
           # against itself - no pr-context, so the PR head is taken as the
           # tested commit, 14/14 slices on both sides, zero new failures - and
           # post a green verdict on a commit nothing tested. Refuse a run that
-          # is not a finished run of the PR test workflow.
-          run_json=$(curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}")
-          wf_path=$(printf '%s' "$run_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("path",""))')
-          run_status=$(printf '%s' "$run_json" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("status",""))')
+          # does not belong to the PR test workflow.
+          #
+          # Deliberately NOT also requiring status=completed: the report-handoff
+          # job dispatches this workflow from inside its own run, so the test
+          # run is still 'in_progress' at that moment. Its artifacts are
+          # already uploaded, which is what this job reads.
+          wf_path=$(curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin).get("path",""))')
           if [ "$wf_path" != ".github/workflows/wmcore-pr-test.yml" ]; then
             echo "run ${test_run_id} belongs to '${wf_path}', not the PR test workflow - refusing"
-            exit 1
-          fi
-          if [ "$run_status" != "completed" ]; then
-            echo "run ${test_run_id} is '${run_status}', not completed - refusing to report on it"
             exit 1
           fi
           # The run's own pr-context is the only record of WHICH commit was
