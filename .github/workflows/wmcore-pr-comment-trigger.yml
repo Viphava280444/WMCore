@@ -34,6 +34,7 @@ permissions:
   # issue comment, so both endpoints live under 'issues'
   issues: write
   pull-requests: read   # GET /pulls/{n} for state, mergeable, base and head
+  statuses: read        # is a run for this commit already in flight?
   contents: read
 
 jobs:
@@ -163,7 +164,15 @@ jobs:
         env:
           HEAD_SHA: ${{ steps.pr.outputs.head-sha }}
         run: |
-          gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" > status.json
+          # fail OPEN: this check is an optimization, not a safety gate, so a
+          # failed lookup must not cost the requester their run
+          if ! gh api "repos/${GITHUB_REPOSITORY}/commits/${HEAD_SHA}/status" \
+                 > status.json 2>"$RUNNER_TEMP/status-err.txt"; then
+            echo "::warning::could not read the commit status - dispatching without the duplicate check"
+            cat "$RUNNER_TEMP/status-err.txt"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           pending=$(jq '[.statuses[] | select(.state == "pending")] | length' status.json)
           if [ "${pending:-0}" -gt 0 ]; then
             target=$(jq -r '[.statuses[] | select(.state == "pending")][0].target_url // ""' status.json)
