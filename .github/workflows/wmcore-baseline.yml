@@ -4,10 +4,12 @@
 #   - Runs the full unit test suite on master and keeps the nosetests XML.
 #     The PR report job downloads them from the latest successful run of this
 #     workflow as its baseline.
-#   - Then, only if those tests passed, tags the tested commit as
-#     BASELINE_<timestamp>. PR runs merge the PR onto the newest BASELINE_*
-#     tag, so this tag pins the base commit the baseline tested - and a failed
-#     baseline must not leave a newest tag whose XMLs no PR run can compare to.
+#   - Then, only if every slice produced results, tags the tested commit as
+#     BASELINE_<timestamp>. Failing TESTS do not block the tag: they appear on
+#     both sides of the PR comparison and cancel out. MISSING results do. PR
+#     runs merge the PR onto the newest BASELINE_* tag, so this tag pins the
+#     base commit the baseline tested - and an incomplete baseline must not
+#     leave a newest tag whose XMLs no PR run can compare to.
 #
 # Why: PullRequestReport.py only flags tests that CHANGED between baseline and
 # PR. Baseline and PR must run in the same environment, so environment-caused
@@ -67,7 +69,8 @@ env:
 jobs:
   # Tag format must stay BASELINE_YYYYmmddHHMMSS: other jobs match that pattern.
   #
-  # Runs AFTER the tests, and only when they passed. test-wmcorepy3.sh merges
+  # Runs AFTER the tests, and only when every slice produced results (failing
+  # tests do not block it; see the header). test-wmcorepy3.sh merges
   # PRs onto the NEWEST BASELINE_* tag, while wmcore-pr-report.yml compares
   # against the latest SUCCESSFUL baseline run's XMLs. Tagging first would let
   # a failed baseline leave a newest tag with no matching XMLs, so PRs would be
@@ -93,7 +96,16 @@ jobs:
           echo "Pushed baseline tag $TAG at commit $BASELINE_SHA"
 
       # Never delete a tag that does not match BASELINE_<14 digits>.
+      #
+      # continue-on-error: housekeeping runs AFTER the tag is pushed, so a
+      # transient failure here (the `git ls-remote` heads a pipefail pipeline)
+      # would redden a baseline run whose tag is already live. The report then
+      # skips that run's XMLs while PR slices merge onto its tag, i.e. the two
+      # sides sit on different commits - and two such misses in a row hard-fail
+      # every report on the baseline age limit. A tag not pruned is harmless by
+      # comparison; the next run prunes it.
       - name: Prune baseline tags older than 7 days
+        continue-on-error: true
         run: |
           cutoff=$(date -u -d '7 days ago' +%Y%m%d%H%M%S)
           git ls-remote --tags origin 'BASELINE_*' | awk '{print $2}' | sed 's|^refs/tags/||' \
@@ -357,7 +369,7 @@ jobs:
           except ImportError:
               import xml.etree.ElementTree as ET
           expected = os.environ['ALL_SLICES'].split()
-          total = fails = errs = 0
+          total = fails = errs = skips = 0
           seen, rows, bad = set(), [], []
           for f in sorted(glob.glob('unit-test-xml/nosetestspy3-*.xml')):
               m = re.search(r'nosetestspy3-(\d+)-', os.path.basename(f))
@@ -373,13 +385,17 @@ jobs:
                   total += int(s.get('tests', 0))
                   fails += int(s.get('failures', 0))
                   errs += int(s.get('errors', 0))
+                  skips += int(s.get('skip', s.get('skipped', 0)))
                   rows.append(f"- `{os.path.basename(f)}`: {s.get('tests')} tests, "
                               f"{s.get('failures')} failures, {s.get('errors')} errors")
           missing = [s for s in expected if s not in seen]
           timing = open('stack-timing.txt').read() if os.path.exists('stack-timing.txt') else ''
           lines = ['## WMCore baseline unit tests (3 parallel stacks)', '',
                    f'**{total} tests** in {len(seen)}/{len(expected)} slices, '
-                   f'{fails} failures, {errs} errors', ''] + rows + ['', '```', timing, '```']
+                   f'{fails} failures, {errs} errors, {skips} skipped', '',
+                   'These results are the comparison base for PR reports '
+                   '(tests failing here are not counted against PRs).',
+                   ''] + rows + ['', '```', timing, '```']
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('\n'.join(lines) + '\n')
           if bad:
@@ -404,47 +420,3 @@ jobs:
             rm -rf "/dev/shm/wmci-mdb-$(id -u)-$k"
           done
           docker ps
-
-  summary:
-    needs: unit-tests
-    if: always()
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
-    steps:
-      # The workspace persists between runs on a self-hosted runner. Drop stale
-      # results, or they get counted as this run's.
-      - name: Clean stale results
-        run: rm -rf results
-
-      - name: Download all results
-        uses: actions/download-artifact@v4
-        with:
-          path: results
-
-      - name: Write run summary
-        run: |
-          python3 - <<'EOF'
-          import glob, os
-          try:
-              from defusedxml import ElementTree as ET
-          except ImportError:
-              import xml.etree.ElementTree as ET
-          tests = failures = errors = skipped = 0
-          for f in glob.glob('results/**/nosetests*.xml', recursive=True):
-              try:
-                  suite = ET.parse(f).getroot()
-              except ET.ParseError:
-                  continue
-              suites = [suite] if suite.tag == 'testsuite' else suite.findall('testsuite')
-              for s in suites:
-                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
-                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
-          lines = ['## WMCore baseline results', '',
-                   f'| Tests | Failures | Errors | Skipped |',
-                   f'|---|---|---|---|',
-                   f'| {tests} | {failures} | {errors} | {skipped} |', '',
-                   'These results are the comparison base for PR reports '
-                   '(tests failing here are not counted against PRs).', '']
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write('\n'.join(lines) + '\n')
-          EOF
