@@ -91,7 +91,13 @@ env:
 jobs:
   # fork twin of the previous CI's "Update GitHub PR status" stage: the unchanged
   # PullRequestTestBegin.py posts a 'pending' commit status. It passes no
-  # context, so GitHub names the status "default". It runs on the runner VM.
+  # context, so GitHub names the status "default".
+  #
+  # GitHub-hosted, for the same reason as the report job: the script needs only
+  # python and the GitHub API, while on the single self-hosted runner it queued
+  # behind every waiting test job (28 min observed) and, once it got the slot,
+  # spent ~30 s of the runner's serialized capacity posting one status while a
+  # ready test job waited.
   begin:
     # Skip on fork PRs: their runs hold a read-only token, so this status post
     # would fail. Fork PRs are tested through the dispatch made by
@@ -99,7 +105,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # own-ref checkout: this job only runs for same-repo PRs and
