@@ -1,7 +1,6 @@
 #! /bin/bash -e
 
 WORKDIR=/home/cmsbld
-SCRIPTDIR=$WORKDIR/TestScripts
 CODE=$WORKDIR/WMCore
 
 pushd $WORKDIR
@@ -46,6 +45,16 @@ set -x
 pushd $CODE
 
 git pull origin master
+
+# Baseline mode pins the commit under test: the workflow resolves ONE master
+# sha, tags exactly that, and a run lasts long enough for master to move while
+# the 14 slices are still starting - so without this, later slices tested a
+# different base than earlier ones and than the tag. Unset in PR mode, where
+# the base is pinned by the BASELINE_* tag merged onto below.
+if [[ ! -z "${WMCORE_PINNED_SHA}" ]]; then
+    echo "Baseline run pinned to ${WMCORE_PINNED_SHA}"
+    git reset --hard "${WMCORE_PINNED_SHA}"
+fi
 
 # use PR_NUMBER if triggered from a PR
 if [[ ! -z "${PR_NUMBER}" ]]; then

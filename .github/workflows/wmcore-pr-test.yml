@@ -69,6 +69,10 @@ env:
   WMCORE_DEV_TAG: 'py3.12-2.4.4rc5-stable'
   # PR context passed to the test scripts
   PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+  # master-only by design: the pull_request door filters on it, the slices
+  # merge onto a master BASELINE_* tag and the report compares against a master
+  # baseline. The resolve steps below refuse a non-master base on the dispatch
+  # door, where base_ref is empty - so this is a fixed value, not a fallback.
   TARGET_BRANCH: ${{ github.base_ref || 'master' }}
   BUILD_ID: ${{ github.run_id }}
   # build URL; the report script appends a path, and the trailing '#'
@@ -91,7 +95,13 @@ env:
 jobs:
   # fork twin of the previous CI's "Update GitHub PR status" stage: the unchanged
   # PullRequestTestBegin.py posts a 'pending' commit status. It passes no
-  # context, so GitHub names the status "default". It runs on the runner VM.
+  # context, so GitHub names the status "default".
+  #
+  # GitHub-hosted, for the same reason as the report job: the script needs only
+  # python and the GitHub API, while on the single self-hosted runner it queued
+  # behind every waiting test job (28 min observed) and, once it got the slot,
+  # spent ~30 s of the runner's serialized capacity posting one status while a
+  # ready test job waited.
   begin:
     # Skip on fork PRs: their runs hold a read-only token, so this status post
     # would fail. Fork PRs are tested through the dispatch made by
@@ -99,7 +109,7 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # own-ref checkout: this job only runs for same-repo PRs and
@@ -118,13 +128,28 @@ jobs:
           HEAD_SHA_IN: ${{ inputs.head_sha }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # that door is filtered to base master, so base_ref needs no check
             sha="$EVENT_HEAD_SHA"
-          elif [ -n "$HEAD_SHA_IN" ]; then
-            sha="$HEAD_SHA_IN"
           else
-            sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+            # Dispatch: the pull request object answers both questions - which
+            # commit, and whether this pipeline can test that base at all.
+            # Everything downstream is master-only by construction (slices merge
+            # the PR onto the newest master BASELINE_* tag, the report compares
+            # against a master baseline, and the lint container diffs against
+            # TARGET_BRANCH, which is 'master' on this door), so a PR based on
+            # another branch would be scored against code it never touched.
+            curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "$RUNNER_TEMP/pr.json"
+            base=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base"]["ref"])' "$RUNNER_TEMP/pr.json")
+            if [ "$base" != "master" ]; then
+              echo "PR ${PR_NUMBER} targets '${base}', not master - these tests only run against master"
+              exit 1
+            fi
+            if [ -n "$HEAD_SHA_IN" ]; then
+              sha="$HEAD_SHA_IN"
+            else
+              sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["head"]["sha"])' "$RUNNER_TEMP/pr.json")
+            fi
           fi
           if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
             echo "not a commit SHA: '$sha' - refusing to run against an unknown head"
@@ -166,6 +191,19 @@ jobs:
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
+      # FIRST, before any step that can fail. The self-hosted workspace
+      # persists between runs and the uploads below are if: always(), so a job
+      # that dies early (docker restarting, a checkout hiccup) would otherwise
+      # publish the PREVIOUS run's XMLs, lint reports and logs as this run's
+      # results - including a green master baseline's, since the baseline
+      # workflow shares this workspace. Anything a later step consumes must be
+      # listed here.
+      - name: Clean the persistent workspace
+        run: |
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 ci-stack-4 ci-workspace \
+                 unit-test-xml pr-context \
+                 stack1.log stack2.log stack3.log pylint.log stack-timing.txt
+
       # twin of the begin job's step: the ONE commit this run is allowed to
       # test. The test and lint scripts abort if the PR head has moved past it,
       # and the report workflow posts the statuses on it.
@@ -177,13 +215,28 @@ jobs:
           HEAD_SHA_IN: ${{ inputs.head_sha }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            # that door is filtered to base master, so base_ref needs no check
             sha="$EVENT_HEAD_SHA"
-          elif [ -n "$HEAD_SHA_IN" ]; then
-            sha="$HEAD_SHA_IN"
           else
-            sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
-              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
-              | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
+            # Dispatch: the pull request object answers both questions - which
+            # commit, and whether this pipeline can test that base at all.
+            # Everything downstream is master-only by construction (slices merge
+            # the PR onto the newest master BASELINE_* tag, the report compares
+            # against a master baseline, and the lint container diffs against
+            # TARGET_BRANCH, which is 'master' on this door), so a PR based on
+            # another branch would be scored against code it never touched.
+            curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" > "$RUNNER_TEMP/pr.json"
+            base=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["base"]["ref"])' "$RUNNER_TEMP/pr.json")
+            if [ "$base" != "master" ]; then
+              echo "PR ${PR_NUMBER} targets '${base}', not master - these tests only run against master"
+              exit 1
+            fi
+            if [ -n "$HEAD_SHA_IN" ]; then
+              sha="$HEAD_SHA_IN"
+            else
+              sha=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["head"]["sha"])' "$RUNNER_TEMP/pr.json")
+            fi
           fi
           if ! printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$'; then
             echo "not a commit SHA: '$sha' - refusing to run against an unknown head"
@@ -191,6 +244,34 @@ jobs:
           fi
           echo "PR_HEAD_SHA=${sha}" >> "$GITHUB_ENV"
           echo "PR ${PR_NUMBER} pinned to head ${sha}"
+
+      # Right after the head is known, and before anything else can fail: this
+      # artifact is what lets wmcore-pr-report.yml give the PR a terminal
+      # status. Uploaded late, a job dying in setup shipped none, and the
+      # report then found nothing to report and left the begin job's 'pending'
+      # status on the PR for good.
+      - name: Record PR context for the report workflow
+        if: always()
+        env:
+          # via env, never inline in the script (injection guard)
+          PR_NUM: ${{ github.event.pull_request.number || inputs.pr_number }}
+        run: |
+          # wmcore-pr-report.yml (workflow_run) cannot read this run's inputs,
+          # and its event payload omits fork PRs - ship the number as data.
+          # The head SHA travels with it, so the report can post the statuses on
+          # the commit that was tested and refuse if the PR has moved on.
+          mkdir -p pr-context
+          echo "$PR_NUM" > pr-context/pr-number.txt
+          echo "$PR_HEAD_SHA" > pr-context/pr-head-sha.txt
+
+      - name: Upload PR context
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-context
+          path: |
+            pr-context/pr-number.txt
+            pr-context/pr-head-sha.txt
 
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
@@ -245,6 +326,7 @@ jobs:
       # This step never decides the job outcome - the integrity check below
       # does - so a teardown or lint hiccup cannot turn a complete run red.
       - name: Run 3 stacks and pylint in parallel
+        id: stacks
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -393,8 +475,11 @@ jobs:
           # deliberately green: the XML integrity check is the gate
           exit 0
 
+      # Belt to the workspace wipe's braces: a job that never reached the
+      # stacks has no results of its own, so it must publish none. Every
+      # result-bearing step below carries this guard.
       - name: Collect slice results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         run: |
           rm -rf unit-test-xml
           mkdir -p unit-test-xml
@@ -404,31 +489,8 @@ jobs:
           cat ci-stack-*/artifacts/stack-timing.txt > stack-timing.txt 2>/dev/null || true
           ls -l unit-test-xml
 
-      - name: Record PR context for the report workflow
-        if: always()
-        env:
-          # via env, never inline in the script (injection guard)
-          PR_NUM: ${{ github.event.pull_request.number || inputs.pr_number }}
-        run: |
-          # wmcore-pr-report.yml (workflow_run) cannot read this run's inputs,
-          # and its event payload omits fork PRs - ship the number as data.
-          # The head SHA travels with it, so the report can post the statuses on
-          # the commit that was tested and refuse if the PR has moved on.
-          mkdir -p pr-context
-          echo "$PR_NUM" > pr-context/pr-number.txt
-          echo "$PR_HEAD_SHA" > pr-context/pr-head-sha.txt
-
-      - name: Upload PR context
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr-context
-          path: |
-            pr-context/pr-number.txt
-            pr-context/pr-head-sha.txt
-
       - name: Upload test results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           # the name must keep matching the report job's nosetests-slice-*
@@ -438,7 +500,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload stack logs
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: stack-logs
@@ -453,7 +515,7 @@ jobs:
       # the report job downloads this artifact by its exact name, so the name
       # must stay "lint-reports"
       - name: Upload lint results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: lint-reports
@@ -534,9 +596,16 @@ jobs:
   # events, or a dispatch with a personal token) keep the workflow_run path and
   # skip this job, so no run is reported twice. workflow_dispatch runs execute
   # master's copy of this file, so this job never runs PR-authored code.
+  #
+  # always(), not !cancelled(): a cancelled run (manual Cancel, or the single
+  # runner going away mid-job) is exactly the case that must still be handed
+  # over. !cancelled() skipped this job, so the 'pending' status the begin job
+  # posted stayed on the PR with no run in flight and no way back except a
+  # fresh run. always() is the only condition that still executes a job after
+  # the run was cancelled, and this one is bounded by timeout-minutes below.
   report-handoff:
     needs: unit-tests
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' }}
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && github.triggering_actor == 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -546,6 +615,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUM: ${{ inputs.pr_number }}
+          # what became of the tests. The report has no workflow_run payload on
+          # this door, so without this it would treat a cancelled run as a
+          # completed one and fail on the 14/14 slice gate instead of posting
+          # the terminal 'error' status the PR needs.
+          TEST_CONCLUSION: ${{ needs.unit-tests.result }}
         run: |
           case "$PR_NUM" in ''|*[!0-9]*) echo "pr_number is not a plain number ('$PR_NUM')"; exit 1;; esac
           # This single API call is the only thing that makes a requested run
@@ -555,7 +629,8 @@ jobs:
           ok=""
           for attempt in 1 2 3; do
             if gh workflow run wmcore-pr-report.yml -R "$GITHUB_REPOSITORY" \
-                 -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM"; then
+                 -f run_id="$GITHUB_RUN_ID" -f pr_number="$PR_NUM" \
+                 -f conclusion="$TEST_CONCLUSION"; then
               ok=1
               break
             fi

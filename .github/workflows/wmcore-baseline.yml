@@ -4,10 +4,12 @@
 #   - Runs the full unit test suite on master and keeps the nosetests XML.
 #     The PR report job downloads them from the latest successful run of this
 #     workflow as its baseline.
-#   - Then, only if those tests passed, tags the tested commit as
-#     BASELINE_<timestamp>. PR runs merge the PR onto the newest BASELINE_*
-#     tag, so this tag pins the base commit the baseline tested - and a failed
-#     baseline must not leave a newest tag whose XMLs no PR run can compare to.
+#   - Then, only if every slice produced results, tags the tested commit as
+#     BASELINE_<timestamp>. Failing TESTS do not block the tag: they appear on
+#     both sides of the PR comparison and cancel out. MISSING results do. PR
+#     runs merge the PR onto the newest BASELINE_* tag, so this tag pins the
+#     base commit the baseline tested - and an incomplete baseline must not
+#     leave a newest tag whose XMLs no PR run can compare to.
 #
 # Why: PullRequestReport.py only flags tests that CHANGED between baseline and
 # PR. Baseline and PR must run in the same environment, so environment-caused
@@ -67,7 +69,8 @@ env:
 jobs:
   # Tag format must stay BASELINE_YYYYmmddHHMMSS: other jobs match that pattern.
   #
-  # Runs AFTER the tests, and only when they passed. test-wmcorepy3.sh merges
+  # Runs AFTER the tests, and only when every slice produced results (failing
+  # tests do not block it; see the header). test-wmcorepy3.sh merges
   # PRs onto the NEWEST BASELINE_* tag, while wmcore-pr-report.yml compares
   # against the latest SUCCESSFUL baseline run's XMLs. Tagging first would let
   # a failed baseline leave a newest tag with no matching XMLs, so PRs would be
@@ -93,7 +96,16 @@ jobs:
           echo "Pushed baseline tag $TAG at commit $BASELINE_SHA"
 
       # Never delete a tag that does not match BASELINE_<14 digits>.
+      #
+      # continue-on-error: housekeeping runs AFTER the tag is pushed, so a
+      # transient failure here (the `git ls-remote` heads a pipefail pipeline)
+      # would redden a baseline run whose tag is already live. The report then
+      # skips that run's XMLs while PR slices merge onto its tag, i.e. the two
+      # sides sit on different commits - and two such misses in a row hard-fail
+      # every report on the baseline age limit. A tag not pruned is harmless by
+      # comparison; the next run prunes it.
       - name: Prune baseline tags older than 7 days
+        continue-on-error: true
         run: |
           cutoff=$(date -u -d '7 days ago' +%Y%m%d%H%M%S)
           git ls-remote --tags origin 'BASELINE_*' | awk '{print $2}' | sed 's|^refs/tags/||' \
@@ -111,8 +123,9 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     outputs:
-      # the commit the stacks synced their clone to; tag-baseline tags THIS,
-      # not whatever master has become by the time the tests finish
+      # the commit every slice is pinned to (hard-sync plus WMCORE_PINNED_SHA
+      # below); tag-baseline tags THIS, not whatever master has become by the
+      # time the tests finish
       baseline-sha: ${{ steps.base.outputs.sha }}
     env:
       STACK1_SLICES: '1 2 5 10 12'
@@ -121,13 +134,25 @@ jobs:
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
+      # FIRST, before any step that can fail. The self-hosted workspace
+      # persists between runs and the uploads below are if: always(), so a job
+      # that dies early would otherwise publish the previous run's XMLs and
+      # logs as this run's baseline - which every PR verdict then compares
+      # against. Anything a later step consumes must be listed here.
+      - name: Clean the persistent workspace
+        run: |
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 ci-stack-4 \
+                 unit-test-xml \
+                 stack1.log stack2.log stack3.log stack-timing.txt
+
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
           path: wmcore-src
 
-      # the commit under test: the stacks hard-sync their clone to origin/master
-      # moments after this, so this SHA is the one the tag must name
+      # the commit under test: resolved ONCE here and forced on every stack and
+      # every slice below, so this SHA is what the tests ran and what the tag
+      # names
       - name: Resolve the master commit under test
         id: base
         run: |
@@ -180,6 +205,11 @@ jobs:
       # once each. This step never decides the job outcome - the integrity check
       # below does - so a teardown hiccup cannot turn a complete run red.
       - name: Run 3 stacks in parallel
+        id: stacks
+        env:
+          # the ONE commit this whole run tests; the stack runner script below
+          # reads it from the environment
+          BASELINE_SHA: ${{ steps.base.outputs.sha }}
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -236,16 +266,20 @@ jobs:
             # the old silent-merge default
             git config --file "$GIT_CONFIG_GLOBAL" pull.rebase false
             git config --file "$GIT_CONFIG_GLOBAL" --add safe.directory "*"'
-          # Hard-sync the image's cached clone to fork master BEFORE the
-          # unchanged script's `git pull origin master`: once master moves past
-          # the baked-in state, that pull diverges and git refuses it, which
-          # kills every slice.
+          # Hard-sync the image's cached clone BEFORE the unchanged script's
+          # `git pull origin master`: once master moves past the baked-in
+          # state, that pull diverges and git refuses it, which kills every
+          # slice. Sync to the RESOLVED sha, not to FETCH_HEAD: the three
+          # stacks start 0/20/40 s apart and a run lasts 25-45 min, so
+          # whatever origin/master happens to be at each stack's own start is
+          # not necessarily the commit tag-baseline will tag.
           docker compose exec -T -u "$MY_ID" -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
+            -e BASELINE_SHA="$BASELINE_SHA" \
             -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
             "$TEST_SERVICE" bash -c '
             cd /home/cmsbld/WMCore
             git fetch origin master
-            git checkout -q -B master FETCH_HEAD'
+            git checkout -q -B master "$BASELINE_SHA"'
           stack_start=$(date +%s)
           for S in $SLICE_LIST; do
             s0=$(date +%s)
@@ -255,6 +289,7 @@ jobs:
             if docker compose exec -T -u "$MY_ID" \
                  -e BUILD_ID="$BUILD_ID" -e SLICES="$SLICES" -e SLICE="$S" \
                  -e WMCORE_ORG="$WMCORE_ORG" \
+                 -e WMCORE_PINNED_SHA="$BASELINE_SHA" \
                  -e GIT_CONFIG_GLOBAL=/tmp/wmci-gitconfig \
                  -e WMCORE_TEST_EXIT_ALARM=10 \
                  -e https_proxy="$WMCI_PROXY" -e http_proxy="$WMCI_PROXY" -e no_proxy=localhost,127.0.0.1 \
@@ -286,8 +321,10 @@ jobs:
           # deliberately green: the XML integrity check is the gate
           exit 0
 
+      # Same guard as the wipe above: a job that never reached the stacks
+      # has no results of its own, so it publishes none.
       - name: Collect slice results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         run: |
           rm -rf unit-test-xml
           mkdir -p unit-test-xml
@@ -298,7 +335,7 @@ jobs:
           ls -l unit-test-xml
 
       - name: Upload test results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           # the name must keep matching the report job's nosetests-slice-*
@@ -308,7 +345,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload stack logs
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: stack-logs
@@ -332,7 +369,7 @@ jobs:
           except ImportError:
               import xml.etree.ElementTree as ET
           expected = os.environ['ALL_SLICES'].split()
-          total = fails = errs = 0
+          total = fails = errs = skips = 0
           seen, rows, bad = set(), [], []
           for f in sorted(glob.glob('unit-test-xml/nosetestspy3-*.xml')):
               m = re.search(r'nosetestspy3-(\d+)-', os.path.basename(f))
@@ -348,13 +385,17 @@ jobs:
                   total += int(s.get('tests', 0))
                   fails += int(s.get('failures', 0))
                   errs += int(s.get('errors', 0))
+                  skips += int(s.get('skip', s.get('skipped', 0)))
                   rows.append(f"- `{os.path.basename(f)}`: {s.get('tests')} tests, "
                               f"{s.get('failures')} failures, {s.get('errors')} errors")
           missing = [s for s in expected if s not in seen]
           timing = open('stack-timing.txt').read() if os.path.exists('stack-timing.txt') else ''
           lines = ['## WMCore baseline unit tests (3 parallel stacks)', '',
                    f'**{total} tests** in {len(seen)}/{len(expected)} slices, '
-                   f'{fails} failures, {errs} errors', ''] + rows + ['', '```', timing, '```']
+                   f'{fails} failures, {errs} errors, {skips} skipped', '',
+                   'These results are the comparison base for PR reports '
+                   '(tests failing here are not counted against PRs).',
+                   ''] + rows + ['', '```', timing, '```']
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
               out.write('\n'.join(lines) + '\n')
           if bad:
@@ -379,47 +420,3 @@ jobs:
             rm -rf "/dev/shm/wmci-mdb-$(id -u)-$k"
           done
           docker ps
-
-  summary:
-    needs: unit-tests
-    if: always()
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
-    steps:
-      # The workspace persists between runs on a self-hosted runner. Drop stale
-      # results, or they get counted as this run's.
-      - name: Clean stale results
-        run: rm -rf results
-
-      - name: Download all results
-        uses: actions/download-artifact@v4
-        with:
-          path: results
-
-      - name: Write run summary
-        run: |
-          python3 - <<'EOF'
-          import glob, os
-          try:
-              from defusedxml import ElementTree as ET
-          except ImportError:
-              import xml.etree.ElementTree as ET
-          tests = failures = errors = skipped = 0
-          for f in glob.glob('results/**/nosetests*.xml', recursive=True):
-              try:
-                  suite = ET.parse(f).getroot()
-              except ET.ParseError:
-                  continue
-              suites = [suite] if suite.tag == 'testsuite' else suite.findall('testsuite')
-              for s in suites:
-                  tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
-                  errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
-          lines = ['## WMCore baseline results', '',
-                   f'| Tests | Failures | Errors | Skipped |',
-                   f'|---|---|---|---|',
-                   f'| {tests} | {failures} | {errors} | {skipped} |', '',
-                   'These results are the comparison base for PR reports '
-                   '(tests failing here are not counted against PRs).', '']
-          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as out:
-              out.write('\n'.join(lines) + '\n')
-          EOF

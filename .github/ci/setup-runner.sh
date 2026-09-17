@@ -50,6 +50,11 @@ if [ ! -d /etc/grid-security/certificates ]; then
   note "WARNING: /etc/grid-security/certificates missing (CERN CA bundle)."
   note "  Credentialed tests need it; on CERN VMs it comes from the standard config."
 fi
+if [ ! -r /cvmfs/cms.cern.ch/cmsset_default.sh ]; then
+  note "WARNING: /cvmfs/cms.cern.ch/cmsset_default.sh not readable."
+  note "  Every test slice sources it and exits at once without it, so all 14"
+  note "  slices come back empty. Standard on CERN VMs, like grid-security."
+fi
 [ $fail -eq 0 ] || { note "install the missing tools first, then re-run"; exit 1; }
 
 note "== 2/5 docker access"
