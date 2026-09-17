@@ -90,7 +90,12 @@ jobs:
           pr=''
           tested_sha=''
           rm -rf pr-context pr-context.zip
-          art_url=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          # --retry, like the POSTs below: this whole step is the only thing
+          # that can turn the begin job's pending status into a terminal one,
+          # and under bash -e one transient 5xx on any of these reads aborted
+          # it before a single output was written, leaving the PR pending with
+          # nothing left to re-drive it.
+          art_url=$(curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/runs/${test_run_id}/artifacts?per_page=100" \
             | python3 -c 'import json,sys; m=[a for a in json.load(sys.stdin)["artifacts"] if a["name"]=="pr-context"]; print(m[0]["archive_download_url"] if m else "")')
           if [ -n "$art_url" ]; then
@@ -116,7 +121,7 @@ jobs:
             echo "pr-context head SHA is not a commit SHA ('$tested_sha') - refusing"
             exit 1
           fi
-          head_sha=$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          head_sha=$(curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/pulls/${pr}" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["head"]["sha"])')
           # (i) the artifact is untrusted: what it claims must be what the run
@@ -180,6 +185,27 @@ jobs:
             -d "{\"state\": \"error\", \"target_url\": \"${TEST_RUN_URL}\", \"description\": \"Test run ${CONCLUSION} at $(date -u '+%d %b %Y %H:%M GMT')\"}"
           echo "posted an 'error' status on ${PR_HEAD_SHA}: the test run ended '${CONCLUSION}'"
 
+      # Last resort. If the step above never ran because the ctx step itself
+      # died (an API read that failed past its retries, an unreadable
+      # pr-context), no output was written, so every should/aborted-gated step
+      # below is skipped and the 'pending' status would stay on the PR with
+      # nothing to re-drive it. Post a terminal state on the commit the tests
+      # ran on - which on this door is by definition the workflow_run head, the
+      # same commit the pending status sits on. Only this door: a manual
+      # dispatch that fails for an unrelated reason must not stamp a PR.
+      - name: Post a terminal status if the context step died
+        if: failure() && github.event_name == 'workflow_run' && steps.ctx.outputs.should == '' && steps.ctx.outputs.aborted == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+          TEST_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          curl -sf --retry 3 --retry-all-errors -X POST -H "Authorization: Bearer $GH_TOKEN" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/statuses/${TESTED_SHA}" \
+            -d "{\"state\": \"error\", \"target_url\": \"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\", \"description\": \"Report could not resolve the test run at $(date -u '+%d %b %Y %H:%M GMT')\"}"
+          echo "posted an 'error' status on ${TESTED_SHA}: this report could not resolve the test run."
+          echo "To recover, re-run the report workflow by hand with run_id=${TEST_RUN_ID} and the PR number."
+
       # A hosted runner starts clean; the rm keeps this step correct if the job
       # ever moves back to a persistent workspace.
       - name: Set up report environment
@@ -238,7 +264,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           MAX_AGE_HOURS: ${{ vars.WMCI_BASELINE_MAX_AGE_HOURS || 36 }}
         run: |
-          curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+          curl -sf --retry 3 --retry-all-errors -H "Authorization: Bearer $GH_TOKEN" \
             "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/wmcore-baseline.yml/runs?status=success&per_page=30" \
             > baseline-runs.json
           python3 - <<'EOF'
