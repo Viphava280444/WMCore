@@ -367,10 +367,15 @@ jobs:
                   tests += int(s.get('tests', 0)); failures += int(s.get('failures', 0))
                   errors += int(s.get('errors', 0)); skipped += int(s.get('skip', s.get('skipped', 0)))
 
+          out = ''
+          try:
+              out = open('report-stdout.txt', encoding='utf-8', errors='replace').read()
+          except Exception:
+              pass
+
           gate = None
           try:
-              m = re.search(r'Python3 Unit Test summary (\{.*\})',
-                            open('report-stdout.txt', encoding='utf-8', errors='replace').read())
+              m = re.search(r'Python3 Unit Test summary (\{.*\})', out)
               gate = ast.literal_eval(m.group(1)) if m else None
           except Exception:
               pass
@@ -390,30 +395,58 @@ jobs:
           except Exception:
               pass
 
+          # One extractor per phrasing: the template writes "changed from X to
+          # Y" only in the flip sections, "was added with status X" in the
+          # added one and "(X) was deleted" in the deleted one - so the single
+          # flip pattern silently returned nothing for added/deleted, and
+          # those two headings could never render for any PR.
+          NAME = r'([A-Za-z0-9_.]+:[A-Za-z0-9_]+)'
+
           def flips(key):
-              return re.findall(r'([A-Za-z0-9_.]+:[A-Za-z0-9_]+) changed from (\w+) to (\w+)', sections.get(key, ''))
+              return re.findall(NAME + r' changed from (\w+) to (\w+)', sections.get(key, ''))
+
+          def adds(key):
+              return re.findall(NAME + r' was added with status (\w+)', sections.get(key, ''))
+
+          def dels(key):
+              return re.findall(NAME + r' \((\w+)\) was deleted', sections.get(key, ''))
 
           pr = os.environ.get('PR_NUMBER', '?'); sha = os.environ.get('PR_HEAD_SHA', '')[:9]
           L = ['## WMCore PR test results: PR #%s, commit `%s`' % (pr, sha), '']
-          if gate is not None:
-              nf = gate.get('newFailures')
-              L.append('**Verdict: %s** (report counters: `%s`)' % (
-                  'PASS, 0 new failures' if nf == 0 else '%s new failure(s)' % nf, gate))
+          # Quote the markers PullRequestReport.py prints, which are the same
+          # flags that drive the commit statuses. The counter dict carries no
+          # 'failed' flag: a test that exists only on the PR side and errors
+          # sets it while newFailures stays 0, and a pylint-only failure never
+          # touches the dict at all - so a verdict derived from newFailures
+          # printed PASS beside a red status on the same commit.
+          counters = ' (report counters: `%s`)' % gate if gate is not None else ''
+          markers = ('DMWM-FAIL-PY3-UNIT', 'DMWM-SUCCEED-PY3-UNIT',
+                     'DMWM-FAIL-PYLINTPY3', 'DMWM-SUCCEED-PYLINTPY3')
+          if any(mk in out for mk in markers):
+              # a missing marker means that side did not run: neither pass nor fail
+              bad = [name for name, failed in (('unit tests', 'DMWM-FAIL-PY3-UNIT' in out),
+                                               ('pylint', 'DMWM-FAIL-PYLINTPY3' in out)) if failed]
+              L.append('**Verdict: %s**%s' % (
+                  'PASS' if not bad else 'FAIL (%s)' % ', '.join(bad), counters))
           else:
-              L.append('**Verdict unavailable**: the report step did not print its summary dict; the commit statuses are the authority.')
+              L.append('**Verdict unavailable**: the report step printed no status markers; the commit statuses are the authority.')
           if os.environ.get('BASELINE_RUN'):
               L.append('Baseline: run %s, created %s, age %s h' % (
                   os.environ['BASELINE_RUN'], os.environ.get('BASELINE_CREATED', '?'), os.environ.get('BASELINE_AGE_H', '?')))
           L += ['', '| Tests | Failures | Errors | Skipped |', '|---|---|---|---|',
                 '| %d | %d | %d | %d |' % (tests, failures, errors, skipped), '',
                 'Failures and errors that also occur on master do not count; only tests that pass on master and fail here do.', '']
-          for title, key in (('New failures (must be resolved)', 'New failures of unit tests'),
-                             ('Tests no longer failing', 'Changed unit tests'),
-                             ('Unstable tests that flipped (forgiven)', 'Unstable unit tests changed'),
-                             ('Tests added', 'Unit tests added'), ('Tests deleted', 'Unit tests deleted')):
-              items = flips(key)
+          for title, key, extract in (
+                  ('New failures (must be resolved)', 'New failures of unit tests', flips),
+                  ('Tests no longer failing', 'Changed unit tests', flips),
+                  ('Unstable tests that flipped (forgiven)', 'Unstable unit tests changed', flips),
+                  ('Tests added', 'Unit tests added', adds),
+                  ('Tests deleted', 'Unit tests deleted', dels)):
+              items = extract(key)
               if items:
-                  L += ['### %s: %d' % (title, len(items))] + ['- `%s` (%s to %s)' % t for t in items] + ['']
+                  L += ['### %s: %d' % (title, len(items))]
+                  L += ['- `%s` (%s)' % (t[0], ' to '.join(t[1:])) for t in items]
+                  L += ['']
           py = sections.get('Summary of Python3 pylint report', '').strip()
           if py:
               L += ['### Pylint', py[:700].strip(), '']
