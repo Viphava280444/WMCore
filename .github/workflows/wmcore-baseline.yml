@@ -121,6 +121,17 @@ jobs:
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
+      # FIRST, before any step that can fail. The self-hosted workspace
+      # persists between runs and the uploads below are if: always(), so a job
+      # that dies early would otherwise publish the previous run's XMLs and
+      # logs as this run's baseline - which every PR verdict then compares
+      # against. Anything a later step consumes must be listed here.
+      - name: Clean the persistent workspace
+        run: |
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 ci-stack-4 \
+                 unit-test-xml \
+                 stack1.log stack2.log stack3.log stack-timing.txt
+
       - name: Checkout this repo (CI glue)
         uses: actions/checkout@v4
         with:
@@ -180,6 +191,7 @@ jobs:
       # once each. This step never decides the job outcome - the integrity check
       # below does - so a teardown hiccup cannot turn a complete run red.
       - name: Run 3 stacks in parallel
+        id: stacks
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -286,8 +298,10 @@ jobs:
           # deliberately green: the XML integrity check is the gate
           exit 0
 
+      # Same guard as the wipe above: a job that never reached the stacks
+      # has no results of its own, so it publishes none.
       - name: Collect slice results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         run: |
           rm -rf unit-test-xml
           mkdir -p unit-test-xml
@@ -298,7 +312,7 @@ jobs:
           ls -l unit-test-xml
 
       - name: Upload test results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           # the name must keep matching the report job's nosetests-slice-*
@@ -308,7 +322,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload stack logs
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: stack-logs

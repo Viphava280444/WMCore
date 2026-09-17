@@ -166,6 +166,19 @@ jobs:
       # every slice id that must produce an XML for the run to count
       ALL_SLICES: '0 1 2 3 4 5 6 7 8 9 10 11 12 13'
     steps:
+      # FIRST, before any step that can fail. The self-hosted workspace
+      # persists between runs and the uploads below are if: always(), so a job
+      # that dies early (docker restarting, a checkout hiccup) would otherwise
+      # publish the PREVIOUS run's XMLs, lint reports and logs as this run's
+      # results - including a green master baseline's, since the baseline
+      # workflow shares this workspace. Anything a later step consumes must be
+      # listed here.
+      - name: Clean the persistent workspace
+        run: |
+          rm -rf ci-stack-1 ci-stack-2 ci-stack-3 ci-stack-4 ci-workspace \
+                 unit-test-xml pr-context \
+                 stack1.log stack2.log stack3.log pylint.log stack-timing.txt
+
       # twin of the begin job's step: the ONE commit this run is allowed to
       # test. The test and lint scripts abort if the PR head has moved past it,
       # and the report workflow posts the statuses on it.
@@ -245,6 +258,7 @@ jobs:
       # This step never decides the job outcome - the integrity check below
       # does - so a teardown or lint hiccup cannot turn a complete run red.
       - name: Run 3 stacks and pylint in parallel
+        id: stacks
         run: |
           cat > stack-runner.sh <<'RUNNER'
           #!/bin/bash
@@ -393,8 +407,11 @@ jobs:
           # deliberately green: the XML integrity check is the gate
           exit 0
 
+      # Belt to the workspace wipe's braces: a job that never reached the
+      # stacks has no results of its own, so it must publish none. Every
+      # result-bearing step below carries this guard.
       - name: Collect slice results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         run: |
           rm -rf unit-test-xml
           mkdir -p unit-test-xml
@@ -428,7 +445,7 @@ jobs:
             pr-context/pr-head-sha.txt
 
       - name: Upload test results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           # the name must keep matching the report job's nosetests-slice-*
@@ -438,7 +455,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload stack logs
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: stack-logs
@@ -453,7 +470,7 @@ jobs:
       # the report job downloads this artifact by its exact name, so the name
       # must stay "lint-reports"
       - name: Upload lint results
-        if: always()
+        if: always() && steps.stacks.conclusion != 'skipped'
         uses: actions/upload-artifact@v4
         with:
           name: lint-reports
