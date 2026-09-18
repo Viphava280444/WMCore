@@ -195,7 +195,7 @@ class MSUnmergedTest(unittest.TestCase):
                                  'deletedSuccess': set(),
                                  'protected': {},
                                  'toDelete': {}},
-                       'dirs': {'allUnmerged': [],
+                       'dirs': {'allUnmerged': set(),
                                 "deletedSuccess": set(),
                                 "deletedFail": set(),
                                 'protected': {'/store/unmerged/RunIIAutumn18FSPremix/PMSSM_set_1_prompt_1_TuneCP2_13TeV-pythia8/AODSIM/GridpackScan_102X_upgrade2018_realistic_v15-v1',
