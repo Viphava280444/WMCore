@@ -106,13 +106,20 @@ LOG_LINE_RE = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}:(INFO|WARNING|E
 # ---------------------------------------------------------------------------
 HIDE_LINE_WORDS = ("Identity files", "cert file", "key file", "X509_USER", "Command line arguments")
 SECRET_ENV = ("X509_USER_CERT", "X509_USER_KEY", "X509_USER_PROXY", "WMCI_SECRETS_DIR")
+# Runner folders (S1): their values are replaced by <runner>, so a crash message
+# with a workspace path never reaches the comment, the status or state.json.
+RUNNER_ENV = ("GITHUB_WORKSPACE", "RUNNER_WORKSPACE", "RUNNER_TEMP", "HOME")
 SECRET_KEYS = {"DN", "RequestorDN", "user_dn", "create_by", "last_modified_by",
                "proxy_warning", "down_component_detail"}
-# What must never be printed: any path through a "*secrets" folder (the runner's
-# credential folder is also hidden by value through WMCI_SECRETS_DIR above), the
-# tweaked /tmp json, grid proxy files, certificate and key files, DNs and tokens.
+# What must never be printed (spec 2.10 rule 2): any token containing
+# "ci-secrets", any path through a "*secrets" folder, any path under the
+# runner user's /data/<user> folder (built at run time, see _data_home), the
+# tweaked /tmp json, grid proxy files, certificate and key files, DNs, tokens.
+_TOKEN = r"[^\s'\"()<>,;]"
 _REDACT_RES = [
-    (re.compile(r"[^\s'\"]*/[^\s'\"/]*secrets(?=/|[\s'\"]|$)[^\s'\"]*", re.IGNORECASE), "<secret-path>"),
+    (re.compile(r"%s*ci-secrets%s*" % (_TOKEN, _TOKEN), re.IGNORECASE), "<secret-path>"),
+    (re.compile(r"%s*/[^\s'\"()<>,;/]*secrets\b%s*" % (_TOKEN, _TOKEN), re.IGNORECASE), "<secret-path>"),
+    (re.compile(r"(?<![^\s'\"()<>,;=:])[^\s'\"()<>,;/]*secrets/%s*" % _TOKEN, re.IGNORECASE), "<secret-path>"),
     (re.compile(r"/tmp/[A-Za-z0-9._-]+\.json"), "<tmp-json>"),
     (re.compile(r"(?:/tmp/)?x509up_u\d+"), "<proxy>"),
     (re.compile(r"\S*user(?:cert|key)\S*"), "<cert>"),
@@ -122,6 +129,25 @@ _REDACT_RES = [
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "<token>"),
     (re.compile(r"Bearer\s+\S+"), "<token>"),
 ]
+
+
+def _data_home():
+    """'/data/<runner user>', the folder that holds the runner and ci-secrets
+    (same rule as .github/ci/setup-env-gha.sh), or None."""
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except (KeyError, OSError):
+        return None
+    return "/data/" + user if re.match(r"^[A-Za-z0-9._-]{1,64}$", user or "") else None
+
+
+def _replace_values(text, names, placeholder):
+    """Replace the values of the named env vars (at least 4 characters), longest first."""
+    values = sorted({os.environ.get(n, "").rstrip("/") for n in names}, key=len, reverse=True)
+    for value in values:
+        if len(value) >= 4:
+            text = text.replace(value, placeholder)
+    return text
 
 
 def redact(text):
@@ -135,12 +161,13 @@ def redact(text):
             line = "[line hidden: credentials]"
         lines.append(line)
     text = "\n".join(lines)
-    for var in SECRET_ENV:
-        value = os.environ.get(var, "")
-        if len(value) >= 4:
-            text = text.replace(value, "<secret-path>")
+    text = _replace_values(text, SECRET_ENV, "<secret-path>")
+    text = _replace_values(text, RUNNER_ENV, "<runner>")
     for regex, repl in _REDACT_RES:
         text = regex.sub(repl, text)
+    home = _data_home()
+    if home:
+        text = re.sub(r"%s(?=/|[\s'\"()<>,;:.]|$)%s*" % (re.escape(home), _TOKEN), "<secret-path>", text)
     return text
 
 
@@ -280,26 +307,46 @@ def plural(n, word):
 # ---------------------------------------------------------------------------
 # gate (pure)
 # ---------------------------------------------------------------------------
-_FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+# A fence may follow list markers or blockquote markers (S5); a backtick fence
+# has no backtick in its info string (else it is inline code).
+_FENCE_OPEN = re.compile(r"^[ \t]*(?:(?:[-*+]|\d{1,9}[.)]|>)[ \t]*)*(`{3,}(?!.*`)|~{3,})")
+_FENCE_PREFIX = r"^[ \t]*(?:(?:[-*+]|\d{1,9}[.)]|>)[ \t]*)*"
+_INDENTED = re.compile(r"^(?: {4}|[ ]{0,3}\t)")
+_HTML_REGIONS = [
+    # closed regions anywhere; an unclosed one hides to the end only when it
+    # starts a line, as a GFM HTML block does (F5)
+    re.compile(r"<!--.*?-->", re.DOTALL),
+    re.compile(r"<(pre|code)\b[^>]*>.*?</\1\s*>", re.DOTALL | re.IGNORECASE),
+    re.compile(r"^[ ]{0,3}(?:<!--|<(?:pre|code)\b).*\Z", re.DOTALL | re.MULTILINE | re.IGNORECASE),
+]
 
 
 def strip_hidden(body):
-    """Remove <!-- --> regions and fenced code blocks (``` or ~~~; unclosed runs to the end)."""
-    body = re.sub(r"<!--.*?(?:-->|\Z)", "", body or "", flags=re.DOTALL)
+    """Remove what GitHub shows as code or hides (pure).
+
+    Order (F5): fenced blocks first (``` or ~~~, also after a list or quote
+    marker; unclosed runs to the end), then indented code lines (4 spaces or a
+    tab), then <!-- -->, <pre> and <code> regions.
+    """
     out = []
     fence = None
-    for line in body.split("\n"):
+    for line in (body or "").split("\n"):
         if fence is None:
             match = _FENCE_OPEN.match(line)
             if match:
                 fence = match.group(1)
                 continue
+            if _INDENTED.match(line):
+                continue
             out.append(line)
         else:
-            close = re.match(r"^ {0,3}(%s{%d,})[^\S\n]*$" % (re.escape(fence[0]), len(fence)), line)
+            close = re.match(r"%s(%s{%d,})[^\S\n]*$" % (_FENCE_PREFIX, re.escape(fence[0]), len(fence)), line)
             if close:
                 fence = None
-    return "\n".join(out)
+    text = "\n".join(out)
+    for regex in _HTML_REGIONS:
+        text = regex.sub("", text)
+    return text
 
 
 def parse_command(body):
@@ -478,6 +525,13 @@ def cmd_check(args):
         refuse(work, state, "check", "started by %s, who is not in WMCI_INJECT_USERS" % args.actor)
     if args.mode == "off":
         refuse(work, state, "check", "mode is off")
+    # the switch is read again here: a re-run reuses the gate's mode, so
+    # WMCI_INJECT_MODE=off (or a lower value) must still stop it
+    ceiling = args.ceiling if args.ceiling in MODES else "off"
+    if ceiling == "off":
+        refuse(work, state, "check", "WMCI_INJECT_MODE is off now")
+    if MODES.index(args.mode) > MODES.index(ceiling):
+        refuse(work, state, "check", "mode %s is above the WMCI_INJECT_MODE ceiling %s" % (args.mode, ceiling))
     if args.mode not in BUILT_MODES:
         refuse(work, state, "check", "mode %s not built in M1a" % args.mode)
     clock = FakeClock(time.time())
@@ -1041,9 +1095,14 @@ def cmd_wait(args):
     name = (state.get("inject") or {}).get("request")
     if not name:
         raise UsageError("no request name: run inject first")
-    clock = FakeClock(time.time())
+    # the deadline counts from the injection (spec 2.3 wait), and the fake
+    # doc's first transitions carry the inject time (spec 2.12)
+    t0 = float(state["inject"].get("time") or time.time())
+    clock = FakeClock(t0)
     source = FakeSource(run["fixtures"], run["scenario"], name, clock)
-    result = run_wait(source, clock, name, DEADLINE_H * 3600.0, POLL_MIN * 60.0)
+    deadline_s = DEADLINE_H * 3600.0
+    result = run_wait(source, clock, name, deadline_s, POLL_MIN * 60.0, t0=t0)
+    result["deadline_at"] = int(t0 + deadline_s)
     result["fake_clock"] = True
     end_stage(args.work, state, "wait", result)
     emit(result)
@@ -1375,6 +1434,7 @@ def build_parser():
     for name in ("--work", "--mode", "--pr", "--sha", "--run", "--run-url", "--login", "--actor"):
         check.add_argument(name, required=True)
     check.add_argument("--users", default="")
+    check.add_argument("--ceiling", required=True, help="WMCI_INJECT_MODE now (missing or unknown = off)")
     check.add_argument("--scenario", default="pass")
     check.add_argument("--fixtures", default=None)
     check.set_defaults(func=cmd_check)

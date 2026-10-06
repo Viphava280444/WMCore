@@ -26,6 +26,16 @@
 #   WMCI_INJECT_MODE   off | fake | readonly | inject-only | assign (missing = off)
 #   WMCI_INJECT_USERS  comma-separated GitHub logins allowed to start a run
 #   WMCI_INJECT_PATCH  off | on (phase 2; agent.sh is not called in M1a)
+#
+# First live run: GitHub starts issue_comment runs only from the copy of this
+# file on the default branch, and dispatches only a workflow it has seen.
+# So merge to the fork's master with WMCI_INJECT_MODE unset (missing = off:
+# the gate refuses every request), then set WMCI_INJECT_MODE=fake and test
+# with a dispatch or a comment. (To test before the merge instead, add a
+# temporary 'push: branches: [ci/injection-m1a]' trigger, push once so the
+# workflow is registered - the gate 'if' is false for push, so every job is
+# skipped - dispatch with --ref ci/injection-m1a, and remove the trigger
+# before the merge.)
 
 name: Injection test
 
@@ -52,6 +62,11 @@ on:
         default: pass
 
 permissions: {}               # every job states its own
+
+# bash -eo pipefail: a failed command in a pipe fails the step
+defaults:
+  run:
+    shell: bash
 
 jobs:
   gate:
@@ -153,7 +168,10 @@ jobs:
               gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_IN}/comments" -f body="$msg" \
                 || echo "::warning::could not post the refusal comment"
             fi
-            echo "ok=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "ok=false"
+              echo "reason=${1}"
+            } >> "$GITHUB_OUTPUT"
             exit 0
           }
           if [ "$GO" != "true" ]; then
@@ -171,7 +189,7 @@ jobs:
           if [ "$base" != "master" ]; then
             refuse "the base branch is not master"
           fi
-          if ! printf '%s' "$head_sha" | grep -qE '^[0-9a-f]{40}$'; then
+          if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
             echo "could not read the head commit of PR ${PR_IN} ('$head_sha')"
             exit 1
           fi
@@ -181,7 +199,11 @@ jobs:
           gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_IN}/files?per_page=100" \
             --jq '.[] | {filename, status, changes, binary: ((has("patch") | not) and .changes == 0)}' \
             | jq -s . > pr-files.json
-          echo "PR ${PR_IN}: $(jq length pr-files.json) changed file(s)"
+          nfiles=$(jq length pr-files.json)
+          echo "PR ${PR_IN}: ${nfiles} changed file(s)"
+          if [ "$nfiles" -lt 1 ]; then
+            refuse "the pull request has no changed files"
+          fi
 
           # the list must belong to the pinned head; phase 2 (the patch) must
           # fetch its diff by that sha, never from pulls/N/files
@@ -212,6 +234,17 @@ jobs:
             -f content=rocket \
             || echo "::warning::no reaction"
 
+      # a refused comment stays silent (or gets the one-line refusal above);
+      # a refused dispatch turns red, so the dispatcher sees why
+      - name: Refused dispatch
+        if: github.event_name == 'workflow_dispatch' && steps.pr.outputs.ok != 'true'
+        env:
+          REASON: ${{ steps.pr.outputs.reason || steps.parse.outputs.reasons || 'not authorized (WMCI_INJECT_USERS or write permission)' }}
+        run: |
+          echo "::error::injection test not started - ${REASON}"
+          echo "Injection test not started: ${REASON}" >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
   run:
     needs: gate
     if: needs.gate.outputs.go == 'true'
@@ -236,9 +269,12 @@ jobs:
       LOGIN: ${{ needs.gate.outputs.login }}
       TRIGGER: ${{ github.triggering_actor }}
       USERS: ${{ vars.WMCI_INJECT_USERS || '' }}
+      # read again at run time: a "Re-run failed jobs" reuses the gate's
+      # mode, so check compares it with the switch as it is now
+      CEILING: ${{ vars.WMCI_INJECT_MODE || 'off' }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       WMCI_INJECT_PATCH: ${{ vars.WMCI_INJECT_PATCH || 'off' }}
-      CI: ${{ github.workspace }}/wmcore-src/.github/ci/inject
+      WMCI_INJECT_DIR: ${{ github.workspace }}/wmcore-src/.github/ci/inject
     steps:
       # the workflow's own ref, never the PR head; no credentials kept, so
       # the inject child (same uid) cannot read a token from .git/config
@@ -262,38 +298,40 @@ jobs:
           echo "WMCI_WORK=$WORK" >> "$GITHUB_ENV"
 
       # the actor check is the first decision of 'check': it stops a
-      # "Re-run failed jobs" by someone outside WMCI_INJECT_USERS
+      # "Re-run failed jobs" by someone outside WMCI_INJECT_USERS; the
+      # ceiling check stops it when WMCI_INJECT_MODE is off now
       - name: Pre-flight
         run: |
-          python3 "$CI/inject_test.py" check --work "$WMCI_WORK" --mode "$MODE" \
+          python3 "$WMCI_INJECT_DIR/inject_test.py" check --work "$WMCI_WORK" --mode "$MODE" \
             --pr "$PR" --sha "$SHA" --run "$GITHUB_RUN_ID" --run-url "$RUN_URL" \
-            --login "$LOGIN" --actor "$TRIGGER" --users "$USERS" --scenario "$SCENARIO"
+            --login "$LOGIN" --actor "$TRIGGER" --users "$USERS" --ceiling "$CEILING" \
+            --scenario "$SCENARIO"
 
       # files, inject and wait skip themselves when an earlier stage wrote
       # state["stop"], so no if: chains are needed
       - name: Changed files
         run: |
-          python3 "$CI/inject_test.py" files --work "$WMCI_WORK" --pr-files pr-files/pr-files.json
+          python3 "$WMCI_INJECT_DIR/inject_test.py" files --work "$WMCI_WORK" --pr-files pr-files/pr-files.json
 
       # phase 2 (not in M1a): 'agent.sh patch' goes here
 
       - name: Inject
         run: |
-          python3 "$CI/inject_test.py" inject --work "$WMCI_WORK" --repo-root "$GITHUB_WORKSPACE/wmcore-src"
+          python3 "$WMCI_INJECT_DIR/inject_test.py" inject --work "$WMCI_WORK" --repo-root "$GITHUB_WORKSPACE/wmcore-src"
 
       - name: Wait
         run: |
-          python3 "$CI/inject_test.py" wait --work "$WMCI_WORK"
+          python3 "$WMCI_INJECT_DIR/inject_test.py" wait --work "$WMCI_WORK"
 
       - name: Cleanup
         if: always()
         run: |
-          python3 "$CI/inject_test.py" cleanup --work "$WMCI_WORK"
+          python3 "$WMCI_INJECT_DIR/inject_test.py" cleanup --work "$WMCI_WORK"
 
       - name: Report
         if: always()
         run: |
-          python3 "$CI/inject_test.py" report --work "$WMCI_WORK" --out "$WMCI_WORK/out"
+          python3 "$WMCI_INJECT_DIR/inject_test.py" report --work "$WMCI_WORK" --out "$WMCI_WORK/out"
           cat "$WMCI_WORK/out/comment.md" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the report
@@ -361,8 +399,17 @@ jobs:
           jq -n --arg d "ERROR: run job ${RUN_RESULT} before the report" \
             '{state: "error", description: $d}' > report/status.json
 
+      # one transient 5xx must not lose the result: 3 tries per write
       - name: Commit status
         run: |
+          retry() {
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              echo "attempt ${attempt} failed"
+              [ "$attempt" = 3 ] || sleep 10
+            done
+            return 1
+          }
           state=$(jq -r .state report/status.json)
           case "$state" in
             success|failure|error) ;;
@@ -370,21 +417,38 @@ jobs:
           esac
           desc=$(jq -r .description report/status.json | cut -c1-140)
           echo "Injection test on ${SHA}: ${state} - ${desc}"
-          gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
+          retry gh api -X POST "repos/${GITHUB_REPOSITORY}/statuses/${SHA}" \
             -f state="$state" -f context="Injection test" \
             -f description="$desc" -f target_url="$RUN_URL"
 
       # one marker comment per PR, edited by every run. Only bot comments
       # whose body STARTS with the marker count, so a marker typed by a
       # person or echoed inside another report is never overwritten.
+      # always(): a failed status write must not cost the PR its comment
+      # (it carries the cleanup line). A failed lookup fails the step
+      # (pipefail) instead of posting a second marker comment.
       - name: Comment (find or edit)
+        if: always()
         run: |
-          id=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
-                 --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- wmci-inject -->"))) | .id' | tail -n 1)
+          retry() {
+            for attempt in 1 2 3; do
+              if "$@"; then return 0; fi
+              echo "attempt ${attempt} failed"
+              [ "$attempt" = 3 ] || sleep 10
+            done
+            return 1
+          }
+          find_ids() {
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | startswith("<!-- wmci-inject -->"))) | .id' \
+              > marker-ids.txt
+          }
+          retry find_ids
+          id=$(tail -n 1 marker-ids.txt)
           if [ -n "$id" ]; then
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -F body=@report/comment.md
+            retry gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${id}" -F body=@report/comment.md
             echo "edited comment ${id}"
           else
-            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@report/comment.md
+            retry gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@report/comment.md
             echo "posted a new comment"
           fi

@@ -71,10 +71,20 @@ def last_json(text):
     return json.loads(text.strip().splitlines()[-1])
 
 
-def check_argv(work, scenario="pass", mode="fake", actor="alice", users="alice", sha=SHA, pr="12", run="123"):
+def check_argv(work, scenario="pass", mode="fake", actor="alice", users="alice", sha=SHA, pr="12", run="123",
+               ceiling="fake"):
     return ["check", "--work", work, "--mode", mode, "--pr", pr, "--sha", sha, "--run", run,
             "--run-url", "https://github.com/o/r/actions/runs/123", "--login", "alice",
-            "--actor", actor, "--users", users, "--scenario", scenario]
+            "--actor", actor, "--users", users, "--ceiling", ceiling, "--scenario", scenario]
+
+
+def old_trigger_regex():
+    """The own-line pattern of wmcore-pr-comment-trigger.yml (grep -qiE, one line at a time), as Python."""
+    path = os.path.join(REPO, ".github", "workflows", "wmcore-pr-comment-trigger.yml")
+    with open(path) as fd:
+        found = re.findall(r"grep -qiE '([^']*gha test please[^']*)'", fd.read())
+    assert len(found) == 1, found
+    return re.compile(found[0].replace("[:space:]", r" \t\r\n\f\v"), re.IGNORECASE)
 
 
 GOOD_LOG = [
@@ -189,8 +199,13 @@ class ParseCommandTest(unittest.TestCase):
             self.assertEqual(IT.parse_command(body), "none", repr(body))
 
     def test_old_trigger_regex_does_not_match_new_phrase(self):
-        old = re.compile(r"^[ \t\r\n\f\v]*gha test please[ \t\r\n\f\v!.]*$", re.IGNORECASE | re.MULTILINE)
-        self.assertIsNone(old.search("gha injection test please"))
+        old = old_trigger_regex()   # read from the real workflow file (F6)
+        self.assertIsNotNone(old.search("gha test please"))
+        self.assertIsNotNone(old.search("  GHA Test Please!"))
+        for cmd in ("test", "status", "abort"):
+            self.assertIsNone(old.search("gha injection %s please" % cmd))
+        self.assertEqual(IT.parse_command("gha test please"), "none")
+        self.assertIsNone(IT.CMD_RE.search("gha test please"))
 
     def test_status_abort_priority(self):
         self.assertEqual(IT.parse_command("gha injection status please"), "status")
@@ -204,6 +219,25 @@ class ParseCommandTest(unittest.TestCase):
                      "<!--\ngha injection test please\n-->", "<!-- open\ngha injection test please"):
             self.assertEqual(IT.parse_command(body), "none", repr(body))
         self.assertEqual(IT.parse_command("~~~\nx\n~~~\ngha injection test please"), "test")
+
+    def test_code_shown_by_github(self):
+        # S5: forms GitHub shows as code never start a run
+        for body in ("type:\n\n    gha injection test please", "\tgha injection test please",
+                     "- ```\n  gha injection test please\n  ```", "1. ```\n   gha injection test please\n   ```",
+                     "> ```\n> gha injection test please\n> ```",
+                     "<pre>\ngha injection test please\n</pre>", "<code>\ngha injection test please\n</code>",
+                     "<PRE class='x'>\ngha injection test please\n</PRE>", "<pre>\ngha injection test please"):
+            self.assertEqual(IT.parse_command(body), "none", repr(body))
+        for body in ("- ```\n  x\n  ```\ngha injection test please", "a <code>x</code>\ngha injection test please",
+                     "<pre>x</pre>\ngha injection test please", "   gha injection test please"):
+            self.assertEqual(IT.parse_command(body), "test", repr(body))
+
+    def test_unclosed_comment_not_at_line_start(self):
+        # F5: an unclosed <!-- inside inline code or a closed fence hides nothing
+        for body in ("use `<!--` to hide text\ngha injection test please",
+                     "```\n<!-- my note\n```\ngha injection test please",
+                     "use <code> tags\ngha injection test please"):
+            self.assertEqual(IT.parse_command(body), "test", repr(body))
 
 
 class UserAllowedTest(unittest.TestCase):
@@ -278,6 +312,11 @@ class GateTest(unittest.TestCase):
         self.assertFalse(res["go"])
         self.assertIn("mode fake is not allowed from ref refs/heads/feature", res["reasons"])
 
+    def test_unknown_scenario(self):
+        res = self.gate(event="workflow_dispatch", scenario="bogus")
+        self.assertFalse(res["go"])
+        self.assertIn("unknown scenario bogus", res["reasons"])
+
     def test_github_output(self):
         tmp = tempfile.mkdtemp()
         try:
@@ -320,6 +359,9 @@ class CheckTest(Base):
         self.assertFalse(ok)
         self.assertIn("/data1", " ".join(reasons))
         self.assertFalse(IT.agent_ok(self.rows(status="down"), "testbed-vocms0263", 1000000)[0])
+        ok, reasons, _ = IT.agent_ok(self.rows(status="error"), "testbed-vocms0263", 1000000)
+        self.assertFalse(ok)
+        self.assertIn("agent vocms0263.cern.ch status is error", reasons)
         ok, reasons, _ = IT.agent_ok(self.rows(), "testbed-vocms0263", 1000000 + 7200)
         self.assertFalse(ok)
         self.assertIn("agent info is 120 min old", reasons)
@@ -348,6 +390,27 @@ class CheckTest(Base):
         code, _, _ = run_main(check_argv(self.work, sha="ABC"))
         self.assertEqual(code, 2)
         self.assertFalse(os.path.exists(os.path.join(self.work, "state.json")))
+
+    def test_ceiling(self):
+        # S3: a re-run keeps the gate's mode; the switch as it is now must still stop it
+        for ceiling, reason in (("off", "WMCI_INJECT_MODE is off now"), ("", "WMCI_INJECT_MODE is off now"),
+                                ("bogus", "WMCI_INJECT_MODE is off now")):
+            shutil.rmtree(self.work, ignore_errors=True)
+            code, _, _ = run_main(check_argv(self.work, ceiling=ceiling))
+            self.assertEqual(code, 3, ceiling)
+            self.assertEqual(self.state()["stop"]["reasons"], [reason])
+            self.assertNotIn("agents", self.state()["check"])
+        with mock.patch.object(IT, "BUILT_MODES", {"fake", "assign"}):
+            shutil.rmtree(self.work, ignore_errors=True)
+            code, _, _ = run_main(check_argv(self.work, mode="assign", ceiling="readonly"))
+            self.assertEqual(code, 3)
+            self.assertEqual(self.state()["stop"]["reasons"],
+                             ["mode assign is above the WMCI_INJECT_MODE ceiling readonly"])
+        for ceiling in ("fake", "assign"):
+            shutil.rmtree(self.work, ignore_errors=True)
+            code, stdout, _ = run_main(check_argv(self.work, ceiling=ceiling))
+            self.assertEqual(code, 0, ceiling)
+            self.assertTrue(last_json(stdout)["go"])
 
     def test_actor_not_in_users(self):
         code, _, err = run_main(check_argv(self.work, actor="mallory"))
@@ -533,6 +596,27 @@ class InjectTest(Base):
         out = self.pipeline(until="inject")
         self.assertEqual(out["inject"][1]["reasons"], ["tweaked template has the wrong Team"])
 
+    def test_wait_uses_inject_time(self):
+        # F4: deadline and fake transitions start at the inject time stored in the state
+        self.pipeline(until="inject")
+        state = self.state()
+        state["inject"]["time"] = 1791288000
+        self.write_state(state)
+        code, stdout, _ = run_main(["wait", "--work", self.work])
+        self.assertEqual(code, 0)
+        res = last_json(stdout)
+        self.assertEqual(res["deadline_at"], 1791288000 + 5 * 3600)
+        self.assertEqual(res["timeline"][0], ["new", 0])
+
+    def test_wait_mode_guard(self):
+        self.pipeline(until="inject")
+        state = self.state()
+        state["run"]["mode"] = "readonly"
+        self.write_state(state)
+        code, _, _ = run_main(["wait", "--work", self.work])
+        self.assertEqual(code, 3)
+        self.assertEqual(self.state()["stop"]["reasons"], ["mode readonly not built in M1a"])
+
     def test_request_name_format(self):
         name = IT.invent_request_name("gha_fake", "SC_ProdPsi_small_GHA_INJ_PR12_abc1234_R123", 1791288000)
         self.assertRegex(name, r"^gha_fake_SC_ProdPsi_small_GHA_INJ_PR12_abc1234_R123_261006_120000_\d{4}$")
@@ -677,6 +761,14 @@ class WaitTest(unittest.TestCase):
         self.assertNotIn("AgentJobInfo", doc)
         self.assertIn("AgentJobInfo", source.wmstats_answer(4)["result"][0]["req_x"])
 
+    def test_deadline_counts_from_t0(self):
+        # F4: a t0 one hour before the clock start leaves 4 h of polling
+        clock = IT.FakeClock(1791288000 + 3600)
+        source = IT.FakeSource(FIXTURES, "timeout", "req_x", clock)
+        with mock.patch.object(IT, "HOP_S", 0):
+            res = IT.run_wait(source, clock, "req_x", 5 * 3600, 15 * 60, t0=1791288000)
+        self.assertEqual((res["verdict"], res["elapsed_s"], res["polls"]), ("timeout", 5 * 3600, 17))
+
     def test_env_overrides(self):
         tmp = tempfile.mkdtemp()
         try:
@@ -763,6 +855,42 @@ class RedactTest(unittest.TestCase):
                 "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-GenSimFull_SC_ProdPsi_small_GHA_INJ-v1/GEN-SIM"
         self.assertEqual(IT.redact(plain), plain)
 
+    def test_secret_folder_forms(self):
+        # S2 and F1 (spec 2.10 rule 2): any token containing ci-secrets, any path through a *secrets folder
+        for text, want in (("(/srv/x/ci-secrets)", "(<secret-path>)"),
+                           ("from /srv/x/ci-secrets.", "from <secret-path>"),
+                           ("/srv/x/ci-secrets, ok", "<secret-path>, ok"),
+                           ("dir /srv/x/ci-secrets; done", "dir <secret-path>; done"),
+                           ("WMCI_SECRETS_DIR:/srv/x/ci-secrets:x", "<secret-path>"),
+                           ("path=ci-secrets/proxy.txt", "<secret-path>"),
+                           ("ci-secrets/rucio_account.txt", "<secret-path>"),
+                           ("read grid-secrets/proxy now", "read <secret-path> now"),
+                           ("(/srv/grid-secrets/a)", "(<secret-path>)")):
+            self.assertEqual(IT.redact(text), want, text)
+        self.assertEqual(IT.redact("no secrets in this job"), "no secrets in this job")
+
+    def test_data_home(self):
+        # F1: /data/<runner user> (built at run time, never written in the code)
+        with mock.patch.object(IT, "_data_home", lambda: "/data/runneruser"):
+            self.assertEqual(IT.redact("dir /data/runneruser/rucio/cfg"), "dir <secret-path>")
+            self.assertEqual(IT.redact("(/data/runneruser)."), "(<secret-path>).")
+            self.assertEqual(IT.redact("/data/runneruser2/x"), "/data/runneruser2/x")
+        home = IT._data_home()
+        if home:
+            self.assertEqual(IT.redact(home + "/actions-runner/_work"), "<secret-path>")
+
+    def test_runner_paths(self):
+        # S1: runner folders by value, longest first
+        env = {"GITHUB_WORKSPACE": "/srv/gh/runner/_work/WMCore/WMCore", "RUNNER_WORKSPACE": "/srv/gh/runner/_work/WMCore",
+               "RUNNER_TEMP": "/srv/gh/runner/_work/_temp", "HOME": "/srv/gh"}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(IT.redact("open /srv/gh/runner/_work/WMCore/WMCore/wmcore-src/a.py"),
+                             "open <runner>/wmcore-src/a.py")
+            self.assertEqual(IT.redact("at /srv/gh/runner/_work/_temp/w"), "at <runner>/w")
+            self.assertEqual(IT.redact("~ is /srv/gh"), "~ is <runner>")
+        with mock.patch.dict(os.environ, {"HOME": "/"}):
+            self.assertEqual(IT.redact("/a/b"), "/a/b")
+
     def test_redact_obj_drops_keys(self):
         obj = IT.redact_obj({"DN": DN, "a": [{"RequestorDN": DN, "b": "ok"}], "proxy_warning": "x"})
         self.assertEqual(obj, {"a": [{"b": "ok"}]})
@@ -798,6 +926,52 @@ class ReportTest(Base):
                 for bad in ("CN=", "DC=", "/tmp/", "-secrets", "usercert", "userkey", "x509up"):
                     self.assertNotIn(bad, text, (scenario, bad))
             self.assertNotIn("dry-run command", state_text)
+
+    def test_pass_table_rows(self):
+        # F2: the spec 2.11 rows and the status timeline
+        comment, _, _ = self.scenario_outputs("pass")
+        lines = comment.splitlines()
+        for row in ("| Jobs | success 6, failure 0, cooloff 0, pending 0, running 0 |",
+                    "| DBS int | 2 new files, 200 events |",
+                    "| Waited | 2 h 15 min, 10 polls (fake clock) |",
+                    "| Cleanup | reject from `completed` (fake mode: not sent) |",
+                    "| Final status | `completed` |", "| Mode | `fake` |", "| PR / commit | #12 at `abc1234` |"):
+            self.assertIn(row, lines)
+        start = lines.index("| status | minutes after injection |") + 2
+        timeline = [l for l in lines[start:] if l.startswith("| `")][:9]
+        self.assertEqual(timeline, ["| `%s` | %d |" % sm for sm in (
+            ("new", 0), ("assignment-approved", 0), ("assigned", 0), ("staging", 15), ("staged", 30),
+            ("acquired", 45), ("running-open", 60), ("running-closed", 105), ("completed", 120))])
+        self.assertIn("- completed with 6 successful jobs, 0 failed, 2 new files in DBS int", lines)
+
+    def test_crash_path_not_published(self):
+        # S1: a crash message with a runner path never reaches comment, status or state.json
+        ws = os.path.join(self.tmp, "gh-runner", "_work", "WMCore", "WMCore")
+        env = {"GITHUB_WORKSPACE": ws, "RUNNER_TEMP": os.path.join(self.tmp, "gh-runner", "_work", "_temp")}
+        with mock.patch.dict(os.environ, env):
+            self.pipeline(until="inject")
+            state = self.state()
+            state["run"]["fixtures"] = os.path.join(ws, "wmcore-src", ".github", "ci", "inject", "gone")
+            self.write_state(state)
+            code, _, err = run_main(["wait", "--work", self.work])
+            self.assertEqual(code, 1)
+            self.assertIn("FileNotFoundError", err)
+            self.assertIn("<runner>/wmcore-src", self.state()["wait"]["error"])
+            run_main(["report", "--work", self.work, "--out", os.path.join(self.tmp, "out")])
+        comment, status, state_text = self.outputs()
+        self.assertIn("(runner)/wmcore-src", comment)   # plain() turns <> into ()
+        for text in (comment, json.dumps(status), state_text):
+            self.assertNotIn("gh-runner", text)
+            self.assertNotIn(self.tmp, text)
+
+    def test_comment_cut(self):
+        # F3: the MAX_COMMENT cut
+        state = {"run": {"mode": "fake"}, "check": {"done": True},
+                 "stop": {"stage": "check", "verdict": "error", "reasons": ["r" * 2500] * 30}}
+        comment = IT.render_comment(state)
+        self.assertLessEqual(len(comment), IT.MAX_COMMENT)
+        self.assertGreater(len(comment), IT.MAX_COMMENT - 100)
+        self.assertTrue(comment.endswith("\n\n(comment cut: too long)\n"))
 
     def test_error_and_agent_titles(self):
         state = {"run": {"mode": "fake", "pr": "1", "sha7": "abc1234", "login": "alice", "scenario": "pass"},
@@ -855,6 +1029,11 @@ class ReportTest(Base):
                          "\tcert file: '/x/usercert.pem'",
                          "Traceback (most recent call last):",
                          "2026-10-06 12:00:00,000:ERROR:reqmgr2: " + "e" * 300])
+        many = "\n".join("2026-10-06 12:00:00,000:INFO:x: line %d" % i for i in range(25))
+        tail = IT.log_tail(many)
+        self.assertEqual(len(tail), 20)
+        self.assertEqual((tail[0], tail[-1]), ("2026-10-06 12:00:00,000:INFO:x: line 5",
+                                               "2026-10-06 12:00:00,000:INFO:x: line 24"))
         tail = IT.log_tail(log)
         self.assertEqual(len(tail), 2)
         self.assertEqual(tail[0], "[line hidden: credentials]")
