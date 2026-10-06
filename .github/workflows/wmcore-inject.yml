@@ -31,22 +31,13 @@
 # file on the default branch, and dispatches only a workflow it has seen.
 # So merge to the fork's master with WMCI_INJECT_MODE unset (missing = off:
 # the gate refuses every request), then set WMCI_INJECT_MODE=fake and test
-# with a dispatch or a comment. (To test before the merge instead, add a
-# temporary 'push: branches: [ci/injection-m1a]' trigger, push once so the
-# workflow is registered - the gate 'if' is false for push, so every job is
-# skipped - dispatch with --ref ci/injection-m1a, and remove the trigger
-# before the merge.)
+# with a dispatch or a comment.
 
 name: Injection test
 
 on:
   issue_comment:
     types: [created]          # edits never trigger
-  # TEMPORARY, remove before the merge: registers this file so a dispatch
-  # with --ref ci/injection-m1a works before the merge. The gate 'if' is
-  # false for push, so every job is skipped.
-  push:
-    branches: [ci/injection-m1a]
   workflow_dispatch:
     inputs:
       pr:
