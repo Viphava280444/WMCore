@@ -1,0 +1,52 @@
+{
+  "result": [
+    {
+      "gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234": {
+        "_id": "gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234",
+        "RequestName": "gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234",
+        "RequestString": "SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0",
+        "Requestor": "gha_fake",
+        "RequestorDN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User",
+        "RequestType": "StepChain",
+        "SubRequestType": "RelVal",
+        "StepChain": 3,
+        "RequestStatus": "assigned",
+        "RequestTransition": [
+          {"Status": "new", "UpdateTime": 1791288000, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"},
+          {"Status": "assignment-approved", "UpdateTime": 1791288002, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"},
+          {"Status": "assigned", "UpdateTime": 1791288004, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"}
+        ],
+        "RequestDate": [2026, 10, 6, 12, 0, 0],
+        "RequestPriority": 600000,
+        "PriorityTransition": [
+          {"Priority": 600000, "UpdateTime": 1791288000, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"}
+        ],
+        "Campaign": "GHA_INJ_POC",
+        "Team": "testbed-vocms0263",
+        "SiteWhitelist": ["T2_CH_CERN"],
+        "SiteBlacklist": [],
+        "Dashboard": "integration",
+        "AcquisitionEra": {"GenSimFull": "CMSSW_12_0_0", "Digi_2021noPU": "CMSSW_12_0_0", "Reco_2021noPU": "CMSSW_12_0_0"},
+        "ProcessingString": {"GenSimFull": "GenSimFull_SC_ProdPsi_small_GHA_INJ",
+                             "Digi_2021noPU": "Digi_2021noPU_SC_ProdPsi_small_GHA_INJ",
+                             "Reco_2021noPU": "Reco_2021noPU_SC_ProdPsi_small_GHA_INJ"},
+        "ProcessingVersion": 1,
+        "OutputDatasets": [
+          "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-GenSimFull_SC_ProdPsi_small_GHA_INJ-v1/GEN-SIM",
+          "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-Reco_2021noPU_SC_ProdPsi_small_GHA_INJ-v1/GEN-SIM-RECO",
+          "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-Reco_2021noPU_SC_ProdPsi_small_GHA_INJ-v1/MINIAODSIM"
+        ],
+        "CMSSWVersion": "CMSSW_12_0_0",
+        "DbsUrl": "https://cmsweb-testbed.cern.ch/dbs/int/global/DBSReader",
+        "CouchURL": "https://cmsweb-testbed.cern.ch/couchdb",
+        "CouchWorkloadDBName": "reqmgr_workload_cache",
+        "CouchDBName": "reqmgr_config_cache",
+        "MergedLFNBase": "/store/backfill/1",
+        "UnmergedLFNBase": "/store/unmerged",
+        "CustodialSites": [],
+        "NonCustodialSites": [],
+        "TotalEstimatedJobs": 2
+      }
+    }
+  ]
+}

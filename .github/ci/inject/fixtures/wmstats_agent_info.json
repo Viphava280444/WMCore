@@ -1,0 +1,30 @@
+{
+  "total_rows": 1,
+  "offset": 0,
+  "rows": [
+    {
+      "id": "vocms0263.cern.ch",
+      "key": "vocms0263.cern.ch",
+      "value": {
+        "_id": "vocms0263.cern.ch",
+        "_rev": "1-00000000000000000000000000000000",
+        "type": "agent_info",
+        "agent": "WMAgent",
+        "agent_team": "testbed-vocms0263",
+        "agent_version": "2.4.5.8",
+        "agent_url": "vocms0263.cern.ch",
+        "timestamp": 1791288000,
+        "status": "ok",
+        "down_components": [],
+        "down_component_detail": [],
+        "components": {},
+        "workers": [],
+        "drain_mode": false,
+        "disk_warning": [],
+        "couch_process_warning": 0,
+        "WMBS_INFO": {"total_query_time": 1},
+        "LocalWQ_INFO": {"total_query_time": 1}
+      }
+    }
+  ]
+}

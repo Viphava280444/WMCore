@@ -1,0 +1,11 @@
+{
+  "default": [
+    {"filename": "src/python/WMComponent/JobAccountant/AccountantWorker.py", "status": "modified", "changes": 12, "binary": false}
+  ],
+  "not-patchable": [
+    {"filename": "src/python/WMComponent/JobAccountant/AccountantWorker.py", "status": "modified", "changes": 12, "binary": false},
+    {"filename": "setup.py", "status": "modified", "changes": 3, "binary": false},
+    {"filename": "requirements.txt", "status": "modified", "changes": 1, "binary": false},
+    {"filename": "doc/images/agent-flow.png", "status": "added", "changes": 0, "binary": true}
+  ]
+}

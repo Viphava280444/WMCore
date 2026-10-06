@@ -1,0 +1,62 @@
+{
+  "result": [
+    {
+      "gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234": {
+        "RequestName": "gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234",
+        "RequestType": "StepChain",
+        "RequestStatus": "completed",
+        "RequestTransition": [
+          {"Status": "new", "UpdateTime": 1791288000, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"},
+          {"Status": "assignment-approved", "UpdateTime": 1791288002, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"},
+          {"Status": "assigned", "UpdateTime": 1791288004, "DN": "/DC=ch/DC=cern/OU=Organic Units/OU=Users/CN=ghafake/CN=000000/CN=GHA Fake User"}
+        ],
+        "Campaign": "GHA_INJ_POC",
+        "Team": "testbed-vocms0263",
+        "OutputDatasets": [
+          "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-GenSimFull_SC_ProdPsi_small_GHA_INJ-v1/GEN-SIM",
+          "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-Reco_2021noPU_SC_ProdPsi_small_GHA_INJ-v1/GEN-SIM-RECO",
+          "/RelValPsi2SToJPsiPiPi/CMSSW_12_0_0-Reco_2021noPU_SC_ProdPsi_small_GHA_INJ-v1/MINIAODSIM"
+        ],
+        "TotalEstimatedJobs": 2,
+        "AgentJobInfo": {
+          "vocms0263.cern.ch": {
+            "_id": "vocms0263.cern.ch-gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234",
+            "_rev": "1-00000000000000000000000000000000",
+            "type": "agent_request",
+            "workflow": "gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234",
+            "agent": "WMAgent",
+            "agent_team": "testbed-vocms0263",
+            "agent_version": "2.4.5.8",
+            "agent_url": "vocms0263.cern.ch",
+            "timestamp": 1791296100,
+            "skipped": false,
+            "status": {"inWMBS": 6, "inQueue": 0, "success": 6},
+            "sites": {"T2_CH_CERN": {"success": 6}},
+            "tasks": {
+              "/gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234/GenSimFull": {
+                "jobtype": "Production",
+                "status": {"success": 2},
+                "sites": {"T2_CH_CERN": {"success": 2}}
+              },
+              "/gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234/GenSimFull/GenSimFullMergeFEVTDEBUGoutput": {
+                "jobtype": "Merge",
+                "status": {"success": 1},
+                "sites": {"T2_CH_CERN": {"success": 1}}
+              },
+              "/gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234/GenSimFull/GenSimFullCleanupUnmergedFEVTDEBUGoutput": {
+                "jobtype": "Cleanup",
+                "status": {"success": 1},
+                "sites": {"T2_CH_CERN": {"success": 1}}
+              },
+              "/gha_fake_SC_ProdPsi_small_GHA_INJ_PR0_0000000_R0_261006_120000_1234/GenSimFull/LogCollectForGenSimFull": {
+                "jobtype": "LogCollect",
+                "status": {"success": 2},
+                "sites": {"T2_CH_CERN": {"success": 2}}
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}
