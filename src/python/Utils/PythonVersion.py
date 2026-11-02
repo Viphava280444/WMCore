@@ -15,3 +15,4 @@ PY2 = sys.version_info[0] == 2
 # For PY2: set highest protocol to 2
 # For PY3: set highest protocol to 4 (compatible with python3.6 and python3.8)
 HIGHEST_PICKLE_PROTOCOL = pickle.HIGHEST_PROTOCOL if PY2 else 4
+# GitLab shadow-CI smoke test: comment-only change on branch ci/gitlab-shadow-smoke
