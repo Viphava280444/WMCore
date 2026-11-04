@@ -1,6 +1,6 @@
 from __future__ import print_function
 
-from builtins import str as newstr, bytes as newbytes
+from builtins import str as newstr
 
 import atexit
 import hashlib
@@ -175,6 +175,8 @@ if can_nose:
                          "The maximum ID to be executed (advanced use)")]
 
         def initialize_options(self):
+            # distutils commands take their defaults here, not in __init__
+            # pylint: disable=attribute-defined-outside-init
             self.reallyDeleteMyDatabaseAfterEveryTest = False
             self.buildBotMode = False
             self.workerNodeTestsOnly = False
@@ -312,8 +314,10 @@ if can_nose:
 
             threadCount = len(threading.enumerate())
 
-            # Set the signal handler and a 20-second alarm
-            def signal_handler(dummy1, dummy2):
+            # Set the signal handler and an exit alarm: 20 seconds by default,
+            # WMCORE_TEST_EXIT_ALARM overrides it (CI shortens the wait; the
+            # hang it bounds is a dead join on leaked non-daemon threads)
+            def signal_handler(_signum, _frame):
                 sys.stderr.write("Timeout reached trying to shut down. Force killing...\n")
                 sys.stderr.flush()
                 if retval:
@@ -322,8 +326,8 @@ if can_nose:
                     os.DMWM_REAL_EXIT(1)
 
             signal.signal(signal.SIGALRM, signal_handler)
-            signal.alarm(20)
-            marker = open("nose-marker.txt", "w")
+            signal.alarm(int(os.environ.get("WMCORE_TEST_EXIT_ALARM", "20")))
+            marker = open("nose-marker.txt", "w", encoding="utf-8")
             marker.write("Ready to be slayed\n")
             marker.flush()
             marker.close()
@@ -406,7 +410,7 @@ class CoverageCommand(Command):
             try:
                 cov = coverage.Coverage(branch=True, data_file='wmcore-coverage.dat')
                 cov.load()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught; any load error means start fresh
                 cov = coverage.Coverage(branch=True, )
                 cov.start()
                 #  runUnitTests() Undefined, no idea where this was supposed to come from - EWV

@@ -1,0 +1,15 @@
+# Pinned SSH host keys for the Tier-0 machines checked by t0-ssh-check.yml.
+#
+# These are PUBLIC host keys, so keeping them in the repo is safe. Pinning them
+# means the job verifies it reached the real machine instead of trusting
+# whatever answers on that name.
+#
+# Collected on 2026-07-30 from vocms047 with:
+#   ssh-keyscan -t ed25519,rsa vocms0500.cern.ch vocms05012.cern.ch
+#
+# If a host is rebuilt its key changes and this check fails loudly. That is the
+# intended behaviour: verify the new key by hand, then update this file.
+vocms0500.cern.ch ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDWG9GzwVrFtaNf1fMkaeCLYzYu0amnd/gO3vF/OV/RE
+vocms0500.cern.ch ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQDAjSTpBseoRz+0xOKpLR3rjKI6oIRjcSh6dDgNBnEd+E774qXwHf/ximjBfZkdey2bZ4WEaiN3FhgKVmoPx+bO/1oBVTD/MOnseWmtZipaJVTn9seGwXAHkBPboJBfwMGm0WAToYnsrTcveEVf7z+xMBiUBDvOoHPOG4ALQ2Me+gKrQXpnHZ7KAvBYlbLU2HmRYapGjjPhSOKgVwpv0u+w0rKVeOjgmFEpviPIR5otVueI5t9Tu8YFDKV+sIzod0/h2ShxcN9m8Kvbf4KhZi6b3LcCf6RaGaBQ+098owApUEYjEzlbPG5pHdMQFYeR29F/3vDdmxjB7LkdWIv4QGPnsdbSX6FpDV++8wzUjGekOKwXejeym+ek1w2YxhfRCQE8LYMGhmyGWzU4V35V9qXgaRfjNjOpjMs2FJE2ocITVnisjzOkME46bx/9iB8hPHa86PJm/q6Q/iIvwFpm9zMvVZo3iUqLdrRsExwVr8KEncygOaL1Gj3zUEpIlmBBm9s=
+vocms05012.cern.ch ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIK5jj2lOEzZP2b2QA6ZIe4Bc06D6lkmrmK40uw3wRHwe
+vocms05012.cern.ch ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCVBc3/XT62N5COkrecKEKhzqw8vByVri6k+MDt6VQONH45g3CHRfOrpwB1InCBSElJlrRXreYVr8jUs/R4Swh/Ip5gmuAiEOgRmOa1xseD5yjz7/NCcFxlqBurpEk2QYT1NV2XScdHPN7b22YoNhqgnUhshWbLryUCywiE9WKZ/i5NhOtrH5YP+6Fz2ni5RSr5hGUuaeV9tQ/FP9zdrwi0hZ26qbA3O+qru4xM/CVCDfp4WTdYJJF72rF3Q3O8c0dvCWK33LGZWs2wVYnkET/Q/XP5gicT1xILlfxBkFq4uEBjBmCq7kJYPAHFSgirhRWoBiEUAAYGTFN0oiqmRIcDPIHxUw9pkrde9S/bGvbcsCecupcT8grKZQF8UgX4EfUTmf32IQgaK2ygqpOT/tVtP9flh2pQRXpmPchxgARXs9w5GeTzTRnAmUAoAbz2IHjQBILILogKHVWVyToWI52UZX0OO9nkEH7mRGWM9rdvquseQOoystSR2ukb0ykNZ6c=
