@@ -348,7 +348,11 @@ class MSUnmerged(MSCore):
 
             for dirLfn in rse['dirs']['toDelete']:
                 # Create a fresh gfal2 context for each directory
-                ctx = self._createGfal2ContextForDirectory(rse['name'], dirLfn)
+                try:
+                    ctx = self._createGfal2ContextForDirectory(rse['name'], dirLfn)
+                except Exception as ex:
+                    self.logger.error("Failed to create gfal2 context for %s: %s", dirLfn, str(ex))
+                    ctx = None
                 if ctx is None:
                     self._updateFailureCounters(rse, dirLfn)
                     continue

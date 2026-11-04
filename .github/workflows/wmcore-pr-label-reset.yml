@@ -1,0 +1,39 @@
+# Removes 'safe-to-test' whenever a PR gets new commits, so the label always
+# means "a maintainer read THIS diff" instead of "a maintainer once read some
+# earlier diff on this branch".
+#
+# pull_request_target runs this file from the base repo with a write token,
+# which is what lets it label a fork PR. That is safe here because nothing from
+# the pull request is executed: the job checks out no code and touches no PR
+# text - only the PR number, passed through env, never inlined into a script.
+
+name: PR label reset
+
+on:
+  pull_request_target:
+    types: [synchronize]
+
+permissions:
+  pull-requests: write
+  issues: write
+
+jobs:
+  reset:
+    if: contains(github.event.pull_request.labels.*.name, 'safe-to-test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_NUM: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Remove the safe-to-test label
+        run: |
+          gh api -X DELETE \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/labels/safe-to-test"
+          echo "removed safe-to-test from PR #${PR_NUM}"
+
+      - name: Say so on the pull request
+        run: |
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUM}/comments" \
+            -f body='New commits pushed: the safe-to-test label was removed. A maintainer must review the new diff and add it again, or comment "gha test please".' \
+            || echo "::warning::label removed, but the explanation comment could not be posted"

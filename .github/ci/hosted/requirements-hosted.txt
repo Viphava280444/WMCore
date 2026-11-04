@@ -1,0 +1,15 @@
+# Dependencies for the GitHub-hosted, zero-CERN workflow (wmcore-hosted-ci.yml).
+# Pinned, pip-only. Deliberately excluded: gfal2-python (WLCG-only, not pip
+# installable on plain ubuntu -- dmwm's own pypi_build_and_images.yaml strips it
+# the same way), rucio-clients, htcondor, and mysqlclient (no manylinux wheels;
+# PyMySQL + sitecustomize.py replaces it).
+SQLAlchemy~=1.4.54     # MUST stay 1.x: WMCore/Database/Dialects.py imports sqlalchemy.databases.mysql
+oracledb~=3.3.0        # pin from requirements.txt; default pip resolves 4.x
+wmcoredb>=0.9.3        # schema SQL, from PyPI
+future~=1.0.0
+PyMySQL~=1.2.0         # replaces mysqlclient
+psutil~=7.0.0
+requests~=2.32.4
+httplib2~=0.22.0
+pycurl~=7.45.6         # manylinux wheel exists for py3.12/x86_64; no apt build deps needed
+pytest~=9.1
